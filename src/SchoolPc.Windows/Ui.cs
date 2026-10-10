@@ -15,6 +15,18 @@ public static class Ui
         Button button = new() { Text = text, AutoSize = true, Height = 38, Padding = new Padding(10, 5, 10, 5), Margin = new Padding(4), FlatStyle = FlatStyle.Flat, BackColor = primary ? Blue : Color.White, ForeColor = primary ? Color.White : Color.FromArgb(30, 40, 60) };
         button.FlatAppearance.BorderColor = Color.FromArgb(214, 220, 230); button.Click += handler; return button;
     }
+    public static ToolStripMenuItem MenuItem(string text, EventHandler handler)
+    {
+        var item = new ToolStripMenuItem(text); item.Click += handler; return item;
+    }
+    public static Button MenuButton(string text, params ToolStripItem[] items)
+    {
+        var menu = new ContextMenuStrip { Font = new Font("맑은 고딕", 10), ShowImageMargin = false };
+        menu.Items.AddRange(items);
+        var button = Button(text + " ▾", (_, _) => { });
+        button.Click += (_, _) => menu.Show(button, new Point(0, button.Height));
+        button.Disposed += (_, _) => menu.Dispose(); return button;
+    }
     public static Label Label(string text, float size = 10) => new() { Text = text, AutoSize = true, Font = new Font("맑은 고딕", size), Margin = new Padding(6), ForeColor = Color.FromArgb(30, 40, 60) };
     public static void Error(IWin32Window owner, Exception e) => MessageBox.Show(owner, e.Message, "작업을 완료하지 못했습니다", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     public static Task<T> OnUi<T>(Control control, Func<T> action)

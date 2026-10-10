@@ -12,9 +12,10 @@ public sealed class AdminForm : Form
     private readonly NumericUpDown port = new() { Minimum = 1024, Maximum = 65535, Width = 85 };
     private readonly TabControl tabs = new() { Dock = DockStyle.Fill };
     private readonly Dictionary<string, SessionPanel> sessions = [];
-    private readonly CheckBox quickConnect = new() { Text = "목록 클릭으로 바로 연결", AutoSize = true, Checked = false, Margin = new Padding(8) };
+    private readonly CheckBox quickConnect = new() { Text = "목록 클릭으로 바로 연결", AutoSize = true, Checked = true, Margin = new Padding(8) };
     private bool refreshing;
-    private readonly Label summary = Ui.Label("등록 파일을 가져온 뒤 PC를 선택해 연결하세요.");
+    private readonly Label empty = new() { Text = "PC를 추가하고 목록에서 선택하세요.\n연결되면 이곳에 화면이 표시됩니다.", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.SlateGray };
+    private readonly Label summary = Ui.Label("PC 추가 → 목록에서 PC 선택 → 대상에서 연결 승인");
     public AdminForm()
     {
         Text = "School PC · 관리자"; Size = new Size(1400, 900); Ui.Style(this); MinimumSize = new Size(1000, 650);
@@ -22,22 +23,29 @@ public sealed class AdminForm : Form
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(14), ColumnCount = 2, RowCount = 3 };
         layout.ColumnStyles.Add(new(SizeType.Absolute, 250)); layout.ColumnStyles.Add(new(SizeType.Percent, 100));
         layout.RowStyles.Add(new(SizeType.AutoSize)); layout.RowStyles.Add(new(SizeType.Percent, 100)); layout.RowStyles.Add(new(SizeType.AutoSize));
-        var header = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        header.Controls.AddRange([Ui.Label("School PC 관리자", 22), Ui.Button("한 번에 모두 연결", async (_, _) => await ConnectAll(), true), Ui.Button("전체 입력 잠금 해제", async (_, _) => await ForAll(p => p.Unlock()), true),
-            Ui.Button("전체 화면 보기", async (_, _) => await ForAll(p => p.Run(new("screen", Enabled: true)))),
-            Ui.Button("모든 연결 종료", (_, _) => DisconnectAll()), Ui.Button("내 Windows Wi-Fi 관리", (_, _) => new WifiForm().Show(this)), Ui.Button("현재 프로그램 제거", async (_, _) => await Removal.RequestAsync(this, () => { DisconnectAll(); return Task.CompletedTask; })), Ui.Button("업데이트 확인", async (_, _) => await Updater.CheckAsync(this, () => { DisconnectAll(); return Task.CompletedTask; }))]);
+        var header = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(0, 0, 0, 8) };
+        var clickConnect = new ToolStripMenuItem("PC 목록 클릭으로 연결") { Checked = quickConnect.Checked, CheckOnClick = true };
+        clickConnect.CheckedChanged += (_, _) => quickConnect.Checked = clickConnect.Checked;
+        header.Controls.AddRange([Ui.Label("School PC", 22), Ui.Button("모두 연결", async (_, _) => await ConnectAll(), true),
+            Ui.Button("모두 연결 끊기", (_, _) => DisconnectAll()),
+            Ui.MenuButton("설정", clickConnect, new ToolStripSeparator(),
+                Ui.MenuItem("모든 PC 화면 보기", async (_, _) => await ForAll(p => p.Run(new("screen", Enabled: true)))),
+                Ui.MenuItem("모든 PC 입력 잠금 해제", async (_, _) => await ForAll(p => p.Unlock())),
+                Ui.MenuItem("받은 파일 폴더", (_, _) => OpenInbox()), new ToolStripSeparator(),
+                Ui.MenuItem("Windows Wi-Fi 관리", (_, _) => new WifiForm().Show(this)),
+                Ui.MenuItem("업데이트 확인", async (_, _) => await Updater.CheckAsync(this, () => { DisconnectAll(); return Task.CompletedTask; })),
+                Ui.MenuItem("현재 프로그램 제거…", async (_, _) => await Removal.RequestAsync(this, () => { DisconnectAll(); return Task.CompletedTask; }))) ]);
         layout.Controls.Add(header, 0, 0); layout.SetColumnSpan(header, 2);
         var sidebar = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 1, Padding = new Padding(4) };
         sidebar.RowStyles.Add(new(SizeType.AutoSize)); sidebar.RowStyles.Add(new(SizeType.Percent, 100)); sidebar.RowStyles.Add(new(SizeType.AutoSize));
-        var import = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        import.Controls.Add(quickConnect);
-        import.Controls.AddRange([Ui.Button("등록 파일 가져오기", (_, _) => Import(), true), Ui.Button("PC 등록 삭제", (_, _) => Remove())]);
-        sidebar.Controls.Add(import, 0, 0); sidebar.Controls.Add(list, 0, 1);
-        var editor = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown };
-        editor.Controls.AddRange([Ui.Label("대상 PC 주소"), address, Ui.Label("포트"), port,
-            Ui.Button("주소 저장", (_, _) => SaveAddress()), Ui.Button("선택한 PC 연결", async (_, _) => await ConnectSelected(), true),
-            Ui.Button("모든 PC 연결", async (_, _) => await ConnectAll()), Ui.Button("선택한 탭 닫기", (_, _) => CloseTab()), Ui.Button("받은 파일 폴더", (_, _) => OpenInbox())]);
-        sidebar.Controls.Add(editor, 0, 2); layout.Controls.Add(sidebar, 0, 1); layout.Controls.Add(tabs, 1, 1);
+        var add = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        add.Controls.AddRange([Ui.Button("PC 추가", (_, _) => Import(), true),
+            Ui.MenuButton("PC 설정", Ui.MenuItem("주소·포트 변경", (_, _) => EditAddress()), Ui.MenuItem("등록 삭제…", (_, _) => Remove()))]);
+        sidebar.Controls.Add(add, 0, 0); sidebar.Controls.Add(list, 0, 1);
+        sidebar.Controls.Add(Ui.Button("선택한 PC 연결", async (_, _) => await ConnectSelected(), true), 0, 2);
+        layout.Controls.Add(sidebar, 0, 1);
+        var workspace = new Panel { Dock = DockStyle.Fill }; workspace.Controls.Add(tabs); workspace.Controls.Add(empty); tabs.Visible = false;
+        layout.Controls.Add(workspace, 1, 1);
         layout.Controls.Add(summary, 0, 2); layout.SetColumnSpan(summary, 2); Controls.Add(layout);
         list.SelectedIndexChanged += (_, _) => { if (list.SelectedItem is Pairing p) { address.Text = p.Host; port.Value = p.Port; } };
         list.MouseClick += async (_, _) => { if (!refreshing && quickConnect.Checked && list.SelectedItem is Pairing p) await Connect(p); };
@@ -48,7 +56,7 @@ public sealed class AdminForm : Form
         refreshing = true;
         int selected = list.SelectedIndex; list.DataSource = null; list.DataSource = profiles.ToArray(); list.DisplayMember = nameof(Pairing.Name);
         if (profiles.Count > 0) list.SelectedIndex = Math.Clamp(selected, 0, profiles.Count - 1);
-        Storage.Save("admin.profiles", profiles); refreshing = false;
+        Storage.Save("admin.profiles", profiles); refreshing = false; UpdateWorkspace();
     }
     private void Import()
     {
@@ -71,6 +79,18 @@ public sealed class AdminForm : Form
             catch (Exception e) { Ui.Error(this, e); }
         }
         RefreshProfiles();
+    }
+    private void UpdateWorkspace() { tabs.Visible = sessions.Count > 0; empty.Visible = sessions.Count == 0; }
+    private void EditAddress()
+    {
+        if (list.SelectedItem is not Pairing p) return;
+        using var dialog = new Form { Text = p.Name + " · 연결 설정", Size = new Size(440, 300), StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false };
+        var fields = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), FlowDirection = FlowDirection.TopDown };
+        var hostField = new TextBox { Text = p.Host, Width = 320 };
+        var portField = new NumericUpDown { Minimum = 1024, Maximum = 65535, Value = p.Port, Width = 110 };
+        fields.Controls.AddRange([Ui.Label("PC 주소"), hostField, Ui.Label("포트"), portField,
+            Ui.Button("저장", (_, _) => { address.Text = hostField.Text; port.Value = portField.Value; SaveAddress(); dialog.Close(); }, true)]);
+        dialog.Controls.Add(fields); dialog.ShowDialog(this);
     }
     private void SaveAddress()
     {
@@ -97,7 +117,7 @@ public sealed class AdminForm : Form
             if (existing.Connection.Connected || existing.IsConnecting) { tabs.SelectedTab = (TabPage)existing.Parent!; return; }
             var previous = (TabPage)existing.Parent!; sessions.Remove(p.Fingerprint); tabs.TabPages.Remove(previous); previous.Dispose();
         }
-        var panel = new SessionPanel(p); var tab = new TabPage(p.Name); tab.Controls.Add(panel); tabs.TabPages.Add(tab); tabs.SelectedTab = tab; sessions.Add(p.Fingerprint, panel);
+        var panel = new SessionPanel(p); var tab = new TabPage(p.Name); tab.Controls.Add(panel); tabs.TabPages.Add(tab); tabs.SelectedTab = tab; sessions.Add(p.Fingerprint, panel); UpdateWorkspace();
         try { summary.Text = p.Name + " 연결 중 · 대상 PC에서 승인해 주세요."; await panel.ConnectAsync(); summary.Text = p.Name + " 연결 완료"; }
         catch (Exception e) { summary.Text = p.Name + ": " + e.Message; }
     }
@@ -114,7 +134,7 @@ public sealed class AdminForm : Form
     private void CloseTab()
     {
         if (tabs.SelectedTab is not { } tab || tab.Controls[0] is not SessionPanel panel) return;
-        sessions.Remove(panel.Connection.Pairing.Fingerprint); tabs.TabPages.Remove(tab); tab.Dispose();
+        sessions.Remove(panel.Connection.Pairing.Fingerprint); tabs.TabPages.Remove(tab); tab.Dispose(); UpdateWorkspace();
     }
     private void DisconnectAll() { foreach (var panel in sessions.Values) panel.Connection.Dispose(); }
     private static void OpenInbox()

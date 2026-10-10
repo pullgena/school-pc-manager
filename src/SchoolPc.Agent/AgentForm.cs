@@ -57,16 +57,19 @@ public sealed class AgentForm : Form
         layout.RowStyles.Add(new(SizeType.AutoSize)); layout.RowStyles.Add(new(SizeType.AutoSize)); layout.RowStyles.Add(new(SizeType.AutoSize));
         layout.RowStyles.Add(new(SizeType.AutoSize)); layout.RowStyles.Add(new(SizeType.AutoSize)); layout.RowStyles.Add(new(SizeType.Percent, 100)); layout.RowStyles.Add(new(SizeType.AutoSize));
         layout.Controls.Add(Ui.Label("내 PC 관리 연결", 22), 0, 0);
-        var fields = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        fields.Controls.AddRange([Ui.Label("PC 이름"), name, Ui.Label("포트"), port, Ui.Label("연결 주소"), host]); layout.Controls.Add(fields, 0, 1);
+        layout.Controls.Add(Ui.Label("① 관리자에게 등록 파일 전달  ② 연결 대기 시작"), 0, 1);
         var buttons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         buttons.Controls.AddRange([Ui.Button("연결 대기 시작", (_, _) => StartListening(), true), Ui.Button("대기·제어 종료", (_, _) => StopListening()),
-            Ui.Button("관리자 등록 파일 저장", (_, _) => ExportPairing()), Ui.Button("등록 키 변경", (_, _) => RotateToken()),
-            Ui.Button("관리자에게 파일 보내기", async (_, _) => await SendLocalFile()), Ui.Button("받은 파일 열기", (_, _) => OpenInbox()),
-            Ui.Button("Windows Wi-Fi 관리", (_, _) => new WifiForm().Show(this)), Ui.Button("현재 프로그램 제거", async (_, _) => await Removal.RequestAsync(this, ShutdownAsync)), Ui.Button("업데이트 확인", async (_, _) => await Updater.CheckAsync(this, ShutdownAsync))]);
-        layout.Controls.Add(buttons, 0, 2);
-        layout.Controls.Add(status, 0, 3); layout.Controls.Add(lockStatus, 0, 4); layout.Controls.Add(log, 0, 5);
-        layout.Controls.Add(Ui.Label("접속 시 이 PC에서 승인합니다. 긴급 종료: Ctrl+Alt+F12 · 잠금은 최대 120초\nWindows 로그인 화면과 UAC 보안 화면은 원격 제어하지 않습니다."), 0, 6);
+            Ui.Button("관리자 등록 파일 저장", (_, _) => ExportPairing()),
+            Ui.MenuButton("설정", Ui.MenuItem("PC 이름·주소·포트", (_, _) => EditConnection()), Ui.MenuItem("등록 키 변경…", (_, _) => RotateToken()), new ToolStripSeparator(),
+                Ui.MenuItem("관리자에게 파일 보내기", async (_, _) => await SendLocalFile()), Ui.MenuItem("받은 파일 폴더", (_, _) => OpenInbox()),
+                Ui.MenuItem("Windows Wi-Fi 관리", (_, _) => new WifiForm().Show(this)), new ToolStripSeparator(),
+                Ui.MenuItem("업데이트 확인", async (_, _) => await Updater.CheckAsync(this, ShutdownAsync)), Ui.MenuItem("현재 프로그램 제거…", async (_, _) => await Removal.RequestAsync(this, ShutdownAsync)))]);
+        layout.Controls.Add(buttons, 0, 2); layout.Controls.Add(status, 0, 3); layout.Controls.Add(lockStatus, 0, 4);
+        var details = new Panel { Dock = DockStyle.Fill };
+        var toggle = Ui.Button("활동 내역 보기", (_, _) => { log.Visible = !log.Visible; }); toggle.Dock = DockStyle.Top;
+        log.Visible = false; details.Controls.Add(log); details.Controls.Add(toggle); layout.Controls.Add(details, 0, 5);
+        layout.Controls.Add(Ui.Label("긴급 종료: Ctrl+Alt+F12 · 접속할 때 이 PC에서 승인합니다."), 0, 6);
         Controls.Add(layout);
         input.Emergency += () => { if (!IsDisposed) BeginInvoke((Action)(() => Disconnect("긴급 해제"))); };
         watchdog.Tick += (_, _) =>
@@ -105,6 +108,18 @@ public sealed class AgentForm : Form
                 .SelectMany(n => n.GetIPProperties().UnicastAddresses).First(a => a.Address.AddressFamily == AddressFamily.InterNetwork).Address.ToString();
         }
         catch { return "127.0.0.1"; }
+    }
+    private void EditConnection()
+    {
+        if (listener != null) { MessageBox.Show(this, "연결 대기를 종료한 뒤 변경할 수 있습니다."); return; }
+        using var dialog = new Form { Text = "내 PC 연결 설정", Size = new Size(450, 360), StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false };
+        var pcName = new TextBox { Text = name.Text, Width = 310 };
+        var pcHost = new TextBox { Text = host.Text, Width = 310 };
+        var pcPort = new NumericUpDown { Minimum = 1024, Maximum = 65535, Value = port.Value, Width = 110 };
+        var fields = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), FlowDirection = FlowDirection.TopDown };
+        fields.Controls.AddRange([Ui.Label("PC 이름"), pcName, Ui.Label("연결 주소"), pcHost, Ui.Label("포트"), pcPort,
+            Ui.Button("저장", (_, _) => { try { name.Text = pcName.Text; host.Text = pcHost.Text; port.Value = pcPort.Value; SaveFields(); dialog.Close(); } catch (Exception e) { Ui.Error(dialog, e); } }, true)]);
+        dialog.Controls.Add(fields); dialog.ShowDialog(this);
     }
     private void SaveFields()
     {

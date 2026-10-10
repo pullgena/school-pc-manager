@@ -56,6 +56,12 @@ jobs:
       - name: Test Windows UI and input hook initialization
         shell: pwsh
         run: dotnet run --project tests/SchoolPc.WindowsSmoke -c Release
+      - name: Save UI previews
+        uses: actions/upload-artifact@v4
+        with:
+          name: UI-previews
+          path: out/previews/
+          retention-days: 7
       - name: Publish standalone administrator and agent
         shell: pwsh
         env:

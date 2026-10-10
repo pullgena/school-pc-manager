@@ -28,13 +28,16 @@ public sealed class SessionPanel : UserControl
         Dock = DockStyle.Fill; Connection = new(pairing);
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, ColumnCount = 1 };
         layout.RowStyles.Add(new(SizeType.AutoSize)); layout.RowStyles.Add(new(SizeType.AutoSize)); layout.RowStyles.Add(new(SizeType.Percent, 100)); layout.RowStyles.Add(new(SizeType.AutoSize));
-        var toolbar = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        toolbar.Controls.AddRange([screen, control, Ui.Button("파일 보내기", async (_, _) => await SendFile()), Ui.Button("파일 받기 요청", async (_, _) => await Run(new("request-file"))),
-            Ui.Button("대상 Wi-Fi 관리 요청", async (_, _) => await Run(new("network-settings"))), Ui.Button("메시지 보내기", (_, _) => Message()), Ui.Button("Windows 잠금", async (_, _) => await LockWindows()), Ui.Button("다시 시작 요청", async (_, _) => await Power("restart")), Ui.Button("종료 요청", async (_, _) => await Power("shutdown")), Ui.Button("연결 종료", (_, _) => Connection.Dispose())]);
-        var locks = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        locks.Controls.AddRange([mouseLock, keyboardLock, seconds, Ui.Label("초 (최대 120)"), Ui.Button("잠금 적용", async (_, _) => await Run(new("locks", X: mouseLock.Checked ? 1 : 0, Y: keyboardLock.Checked ? 1 : 0, Value: (int)seconds.Value))),
-            Ui.Button("입력 잠금 해제", async (_, _) => await Unlock(), true)]);
-        layout.Controls.Add(toolbar, 0, 0); layout.Controls.Add(locks, 0, 1); layout.Controls.Add(view, 0, 2); layout.Controls.Add(status, 0, 3); Controls.Add(layout);
+        var toolbar = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(6) };
+        var showScreen = new ToolStripMenuItem("화면 보기") { Checked = false, CheckOnClick = true };
+        showScreen.CheckedChanged += (_, _) => screen.Checked = showScreen.Checked;
+        screen.CheckedChanged += (_, _) => showScreen.Checked = screen.Checked;
+        toolbar.Controls.AddRange([control,
+            Ui.MenuButton("파일", Ui.MenuItem("파일 보내기", async (_, _) => await SendFile()), Ui.MenuItem("파일 받기 요청", async (_, _) => await Run(new("request-file")))),
+            Ui.MenuButton("잠금", Ui.MenuItem("입력 잠금 설정…", (_, _) => ShowLocks()), Ui.MenuItem("입력 잠금 해제", async (_, _) => await Unlock()), new ToolStripSeparator(), Ui.MenuItem("Windows 잠금…", async (_, _) => await LockWindows())),
+            Ui.MenuButton("더 보기", showScreen, Ui.MenuItem("메시지 보내기", (_, _) => Message()), Ui.MenuItem("대상 Wi-Fi 관리 요청", async (_, _) => await Run(new("network-settings"))), new ToolStripSeparator(), Ui.MenuItem("다시 시작 요청…", async (_, _) => await Power("restart")), Ui.MenuItem("종료 요청…", async (_, _) => await Power("shutdown"))),
+            Ui.Button("연결 끊기", (_, _) => Connection.Dispose())]);
+        layout.Controls.Add(toolbar, 0, 0); layout.Controls.Add(view, 0, 2); layout.Controls.Add(status, 0, 3); Controls.Add(layout);
         screen.CheckedChanged += async (_, _) => { if (connected) await Run(new("screen", Enabled: screen.Checked)); };
         control.CheckedChanged += async (_, _) =>
         {
@@ -63,7 +66,7 @@ public sealed class SessionPanel : UserControl
     {
         if (!await startLock.WaitAsync(0)) return;
         connecting = true;
-        try { await Connection.ConnectAsync(); connected = true; status.Text = "연결되었습니다. 화면 보기를 켜 주세요."; }
+        try { await Connection.ConnectAsync(); connected = true; screen.Checked = true; status.Text = "연결됨 · 조작하려면 원격 입력을 켜세요."; }
         catch (Exception e) { status.Text = e.Message; throw; }
         finally { connecting = false; startLock.Release(); }
     }
@@ -101,6 +104,17 @@ public sealed class SessionPanel : UserControl
         try { if (Connection.Connected) await Connection.SendAsync(p); }
         catch (Exception e) { status.Text = e.Message; }
         finally { events.Release(); Interlocked.Decrement(ref pendingEvents); }
+    }
+    private void ShowLocks()
+    {
+        using var dialog = new Form { Text = "입력 잠금", Size = new Size(450, 310), StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false };
+        var mouse = new CheckBox { Text = "마우스 잠금", Checked = mouseLock.Checked, AutoSize = true };
+        var keyboard = new CheckBox { Text = "키보드 잠금", Checked = keyboardLock.Checked, AutoSize = true };
+        var duration = new NumericUpDown { Minimum = 1, Maximum = 120, Value = seconds.Value, Width = 100 };
+        var fields = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(20), FlowDirection = FlowDirection.TopDown };
+        fields.Controls.AddRange([mouse, keyboard, Ui.Label("자동 해제 시간 (초, 최대 120)"), duration,
+            Ui.Button("적용", async (_, _) => { mouseLock.Checked = mouse.Checked; keyboardLock.Checked = keyboard.Checked; seconds.Value = duration.Value; await Run(new("locks", X: mouse.Checked ? 1 : 0, Y: keyboard.Checked ? 1 : 0, Value: (int)duration.Value)); dialog.Close(); }, true)]);
+        dialog.Controls.Add(fields); dialog.ShowDialog(this);
     }
     public async Task Unlock() { mouseLock.Checked = keyboardLock.Checked = false; await Run(new("unlock")); }
     private async Task SendFile()
