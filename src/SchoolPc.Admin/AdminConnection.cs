@@ -18,6 +18,7 @@ public sealed class AdminConnection : IDisposable
     private Task? receiveTask, heartbeatTask;
     private long lastPong;
     private volatile bool established;
+    public event Action<string>? Progress;
     public event Action<Packet>? Received;
     public event Action<string>? Closed;
     public bool Connected => established && !stop.IsCancellationRequested;
@@ -27,17 +28,22 @@ public sealed class AdminConnection : IDisposable
         try
         {
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stop.Token); deadline.CancelAfter(TimeSpan.FromSeconds(10));
+            Progress?.Invoke($"대상 주소 접속 중 · {Pairing.Host}:{Pairing.Port}");
             await client.ConnectAsync(Pairing.Host, Pairing.Port, deadline.Token);
+            Progress?.Invoke("주소 접속 완료 · 암호화 연결 확인 중");
             var tls = new SslStream(client.GetStream(), false, (_, cert, _, _) => cert != null && Security.EqualHash(Security.Hash(cert.GetRawCertData()), Pairing.Fingerprint));
             channel = new Channel(tls);
             await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "SchoolPcAgent", EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13 }, deadline.Token);
             await channel.SendAsync(new("hello", Text: Pairing.Token), deadline.Token);
+            Progress?.Invoke("연결 요청 전송 완료 · 대상의 인증·승인 응답 대기 중");
             using var approval = CancellationTokenSource.CreateLinkedTokenSource(stop.Token); approval.CancelAfter(TimeSpan.FromSeconds(40));
             var response = await channel.ReadAsync(approval.Token);
             if (response.Type != "accepted") throw new InvalidOperationException(response.Text.Length == 0 ? "관리 대상에서 접속을 거절했습니다." : response.Text);
             established = true; Interlocked.Exchange(ref lastPong, Environment.TickCount64);
             receiveTask = ReadLoop(); heartbeatTask = Heartbeat(); Storage.Audit("admin", "연결: " + Pairing.Name);
         }
+        catch (OperationCanceledException) when (!stop.IsCancellationRequested)
+        { Dispose(); throw new IOException("연결 시간이 초과되었습니다. 대상의 연결 대기 상태, 등록 주소·키, Windows 방화벽 허용 및 활동 내역을 확인해 주세요."); }
         catch { Dispose(); throw; }
     }
     public async Task SendAsync(Packet packet)

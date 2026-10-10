@@ -168,6 +168,7 @@ public sealed class AgentForm : Form
         string address = ((IPEndPoint?)client.Client.RemoteEndPoint)?.Address.ToString() ?? "알 수 없음";
         try
         {
+            await Ui.OnUi(this, () => { AddLog("연결 요청 도착: " + address); log.Visible = true; return true; });
             using (var handshake = CancellationTokenSource.CreateLinkedTokenSource(stop.Token))
             {
                 handshake.CancelAfter(TimeSpan.FromSeconds(10));
@@ -178,7 +179,7 @@ public sealed class AgentForm : Form
             using (var auth = CancellationTokenSource.CreateLinkedTokenSource(stop.Token))
             { auth.CancelAfter(TimeSpan.FromSeconds(5)); hello = await channel.ReadAsync(auth.Token); }
             if (hello.Type != "hello" || hello.Text.Length != 64 || !Security.EqualHash(Security.HashToken(hello.Text), Security.HashToken(settings.Token)))
-            { Storage.Audit("agent", $"인증 실패 {address}"); return; }
+            { await Ui.OnUi(this, () => { AddLog("등록 키가 일치하지 않아 연결을 거절했습니다. 등록 파일을 새로 저장해 관리자에 다시 추가해 주세요."); return true; }); return; }
             bool approved = await ApproveAsync(address, stop.Token);
             if (!approved) { await channel.SendAsync(new("denied", Text: "관리 대상에서 연결을 승인하지 않았습니다."), stop.Token); return; }
             active = new(channel, stop, address);
@@ -235,8 +236,8 @@ public sealed class AgentForm : Form
             }
         }
         catch (Exception e) when (e is IOException or SocketException or AuthenticationException or OperationCanceledException or ObjectDisposedException or InvalidDataException)
-        { Storage.Audit("agent", "연결 종료: " + e.GetType().Name); }
-        catch (Exception e) { Storage.Audit("agent", "연결 오류: " + e.GetType().Name); }
+        { await ReportConnectionError(e); }
+        catch (Exception e) { await ReportConnectionError(e); }
         finally
         {
             stop.Cancel(); client.Dispose();
@@ -245,12 +246,20 @@ public sealed class AgentForm : Form
             Interlocked.Exchange(ref busy, 0);
         }
     }
+    private async Task ReportConnectionError(Exception error)
+    {
+        Storage.Audit("agent", "연결 오류: " + error.GetType().Name);
+        try { await Ui.OnUi(this, () => { AddLog("연결 처리 실패: " + error.GetType().Name + " · 관리자에서 등록 정보와 연결 상태를 확인해 주세요.", audit: false); log.Visible = true; return true; }); }
+        catch (ObjectDisposedException) { }
+    }
     private async Task<bool> ApproveAsync(string address, CancellationToken ct)
     {
         return await Ui.OnUi(this, () =>
         {
             if (ct.IsCancellationRequested) return false;
-            using var dialog = new Form { Text = "관리자 연결 승인", Size = new Size(570, 390), StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false };
+            Show(); WindowState = FormWindowState.Normal; Activate();
+            AddLog("등록 확인 완료 · 연결 승인 창을 확인해 주세요.");
+            using var dialog = new Form { Text = "관리자 연결 승인", TopMost = true, ShowInTaskbar = true, Size = new Size(570, 390), StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false };
             Ui.Style(dialog); dialog.MinimumSize = new Size(570, 390);
             var content = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), FlowDirection = FlowDirection.TopDown };
             content.Controls.Add(Ui.Label($"관리자 주소: {address}\n\n화면 공유, 원격 입력, 파일 받기, 입력 잠금 및\nWindows 잠금 요청을 허용하시겠습니까?\n파일 보내기는 이 PC에서 직접 선택합니다.\n30초 안에 승인하지 않으면 거절합니다."));

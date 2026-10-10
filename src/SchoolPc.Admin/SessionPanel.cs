@@ -12,7 +12,7 @@ public sealed class SessionPanel : UserControl
     private readonly CheckBox mouseLock = new() { Text = "마우스 잠금", AutoSize = true, Margin = new Padding(8) };
     private readonly CheckBox keyboardLock = new() { Text = "키보드 잠금", AutoSize = true, Margin = new Padding(8) };
     private readonly NumericUpDown seconds = new() { Minimum = 1, Maximum = 120, Value = 60, Width = 60, Margin = new Padding(6) };
-    private readonly Label status = Ui.Label("연결 승인 대기 중…");
+    private readonly Label status = Ui.Label("대상 PC 접속 준비 중…");
     private readonly SemaphoreSlim events = new(1);
     private int pendingEvents;
     private int pendingX = -1, pendingY;
@@ -46,6 +46,7 @@ public sealed class SessionPanel : UserControl
             if (connected) await Run(new("control", Enabled: control.Checked));
             status.Text = control.Checked ? "화면을 클릭한 뒤 마우스와 키보드로 제어하세요. 한글 IME는 대상 PC 상태를 따릅니다." : "화면 보기 전용";
         };
+        Connection.Progress += message => Post(() => status.Text = message);
         Connection.Received += Receive; Connection.Closed += reason => Post(() => { connected = false; view.RemoteInput = false; screen.Checked = control.Checked = false; status.Text = reason; });
         view.MoveRemote += (x, y) => { pendingX = x; pendingY = y; };
         mouseTimer.Tick += async (_, _) =>

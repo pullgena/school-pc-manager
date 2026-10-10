@@ -132,7 +132,7 @@ public sealed class AdminForm : Form
             var previous = (TabPage)existing.Parent!; sessions.Remove(p.Fingerprint); tabs.TabPages.Remove(previous); previous.Dispose();
         }
         var panel = new SessionPanel(p); var tab = new TabPage(p.Name); tab.Controls.Add(panel); tabs.TabPages.Add(tab); tabs.SelectedTab = tab; sessions.Add(p.Fingerprint, panel); UpdateWorkspace();
-        try { summary.Text = p.Name + " 연결 중 · 대상 PC에서 승인해 주세요."; await panel.ConnectAsync(); summary.Text = p.Name + " 연결 완료"; }
+        try { summary.Text = p.Name + " 연결 중 · 아래 연결 진행 상태를 확인해 주세요."; await panel.ConnectAsync(); summary.Text = p.Name + " 연결 완료"; }
         catch (Exception e) { summary.Text = p.Name + ": " + e.Message; }
     }
     private async Task ConnectAll()
