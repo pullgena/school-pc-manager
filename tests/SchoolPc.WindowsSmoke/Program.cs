@@ -36,7 +36,7 @@ internal sealed class TestRunner : Form
     {
         foreach (Control child in parent.Controls) { yield return child; foreach (var inner in Descendants(child)) yield return inner; }
     }
-    private static void Click(Form form, string text) => Descendants(form).OfType<Button>().First(b => b.Text == text).PerformClick();
+    private static void ClickButton(Form form, string text) => Descendants(form).OfType<Button>().First(b => b.Text == text).PerformClick();
     private static async Task WaitUntil(Func<bool> predicate, int milliseconds = 10000)
     {
         long deadline = Environment.TickCount64 + milliseconds;
@@ -44,6 +44,9 @@ internal sealed class TestRunner : Form
     }
     private async Task Run()
     {
+        if (System.Runtime.InteropServices.Marshal.SizeOf<WifiManager.InterfaceInfo>() != 532 || System.Runtime.InteropServices.Marshal.SizeOf<WifiManager.ProfileInfo>() != 516) throw new Exception("WLAN ABI mismatch");
+        if (Removal.RoleFiles("SchoolPc.Admin").Contains("agent") || Removal.RoleFiles("SchoolPc.Agent").Contains("admin")) throw new Exception("Removal roles overlap");
+        using (var wifi = new WifiForm()) { wifi.CreateControl(); } // Never mutate runner network profiles.
         byte[] secret = [0, 1, 2, 3, 255];
         if (!UserSecret.Unprotect(UserSecret.Protect(secret)).SequenceEqual(secret)) throw new Exception("DPAPI round trip failed");
         using (var input = new NativeInput()) { input.SetLocks(false, false); input.Unlock(); }
@@ -56,7 +59,7 @@ internal sealed class TestRunner : Form
         var settings = new AgentSettings("CI 교실 PC", port, Convert.ToHexString(RandomNumberGenerator.GetBytes(32))); Storage.Save("agent.settings", settings);
         using var agent = new AgentForm(); agent.Show(); await Task.Delay(100);
         using (var bitmap = new Bitmap(agent.Width, agent.Height)) { agent.DrawToBitmap(bitmap, agent.ClientRectangle); bitmap.Save("out/previews/agent.png"); }
-        Click(agent, "연결 대기 시작");
+        ClickButton(agent, "연결 대기 시작");
         using var cert = X509CertificateLoader.LoadPkcs12(UserSecret.Unprotect(File.ReadAllBytes(Storage.PathFor("agent.certificate"))), "", X509KeyStorageFlags.EphemeralKeySet);
         var pairing = new Pairing(settings.Name, "127.0.0.1", port, Security.Hash(cert.RawData), settings.Token);
         using (var bad = new AdminConnection(pairing with { Token = new string('A', 64) }))
@@ -70,7 +73,7 @@ internal sealed class TestRunner : Form
         approval.Tick += (_, _) =>
         {
             var dialog = Application.OpenForms.Cast<Form>().FirstOrDefault(f => f.Text == "관리자 연결 승인");
-            if (dialog != null) Click(dialog, "이 연결 허용");
+            if (dialog != null) ClickButton(dialog, "이 연결 허용");
         };
         approval.Start();
         using var connection = new AdminConnection(pairing);
@@ -91,7 +94,7 @@ internal sealed class TestRunner : Form
         if (!File.ReadAllBytes(received).SequenceEqual(data)) throw new Exception("Agent file bytes changed");
         File.Delete(received);
         connection.Dispose(); await WaitUntil(() => Descendants(agent).OfType<Label>().Any(l => l.Text == "연결 대기 중"));
-        Click(agent, "대기·제어 종료"); agent.Close();
+        ClickButton(agent, "대기·제어 종료"); agent.Close();
         using (var panel = new SessionPanel(pairing)) { panel.CreateControl(); }
         Console.WriteLine("PASS Windows DPAPI, hooks, forms, real Admin/Agent TLS consent, credential rejection, commands, file transfer and disconnect");
     }

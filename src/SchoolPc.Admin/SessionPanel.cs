@@ -19,6 +19,8 @@ public sealed class SessionPanel : UserControl
     private readonly System.Windows.Forms.Timer mouseTimer = new() { Interval = 40 };
     private bool mouseSending;
     private bool connected;
+    private bool connecting;
+    public bool IsConnecting => connecting;
     private bool disposed;
     private readonly SemaphoreSlim startLock = new(1);
     public SessionPanel(Pairing pairing)
@@ -28,7 +30,7 @@ public sealed class SessionPanel : UserControl
         layout.RowStyles.Add(new(SizeType.AutoSize)); layout.RowStyles.Add(new(SizeType.AutoSize)); layout.RowStyles.Add(new(SizeType.Percent, 100)); layout.RowStyles.Add(new(SizeType.AutoSize));
         var toolbar = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         toolbar.Controls.AddRange([screen, control, Ui.Button("파일 보내기", async (_, _) => await SendFile()), Ui.Button("파일 받기 요청", async (_, _) => await Run(new("request-file"))),
-            Ui.Button("메시지 보내기", (_, _) => Message()), Ui.Button("Windows 잠금", async (_, _) => await LockWindows()), Ui.Button("다시 시작 요청", async (_, _) => await Power("restart")), Ui.Button("종료 요청", async (_, _) => await Power("shutdown")), Ui.Button("연결 종료", (_, _) => Connection.Dispose())]);
+            Ui.Button("대상 Wi-Fi 관리 요청", async (_, _) => await Run(new("network-settings"))), Ui.Button("메시지 보내기", (_, _) => Message()), Ui.Button("Windows 잠금", async (_, _) => await LockWindows()), Ui.Button("다시 시작 요청", async (_, _) => await Power("restart")), Ui.Button("종료 요청", async (_, _) => await Power("shutdown")), Ui.Button("연결 종료", (_, _) => Connection.Dispose())]);
         var locks = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         locks.Controls.AddRange([mouseLock, keyboardLock, seconds, Ui.Label("초 (최대 120)"), Ui.Button("잠금 적용", async (_, _) => await Run(new("locks", X: mouseLock.Checked ? 1 : 0, Y: keyboardLock.Checked ? 1 : 0, Value: (int)seconds.Value))),
             Ui.Button("입력 잠금 해제", async (_, _) => await Unlock(), true)]);
@@ -60,9 +62,10 @@ public sealed class SessionPanel : UserControl
     public async Task ConnectAsync()
     {
         if (!await startLock.WaitAsync(0)) return;
+        connecting = true;
         try { await Connection.ConnectAsync(); connected = true; status.Text = "연결되었습니다. 화면 보기를 켜 주세요."; }
         catch (Exception e) { status.Text = e.Message; throw; }
-        finally { startLock.Release(); }
+        finally { connecting = false; startLock.Release(); }
     }
     private void Receive(Packet p)
     {

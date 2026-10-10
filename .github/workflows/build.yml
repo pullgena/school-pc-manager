@@ -81,7 +81,7 @@ jobs:
             SchoolPc-Windows-x64.zip
             out/previews/
           retention-days: 30
-      - name: Upload release assets or create the initial release
+      - name: Upload release assets or publish a new version
         if: github.event_name != 'pull_request'
         shell: pwsh
         env:
@@ -96,10 +96,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $tag = "v$env:BUILD_VERSION"
           $publish = $env:EVENT_NAME -eq 'release' -or $env:REF_TYPE -eq 'tag' -or $env:PUBLISH_REQUESTED -eq 'true'
-          $initial = $env:EVENT_NAME -eq 'push' -and $env:REF_TYPE -eq 'branch' -and $env:BUILD_VERSION -eq '0.1.0'
+          $initial = $env:EVENT_NAME -eq 'push' -and $env:REF_TYPE -eq 'branch'
           if ($initial) {
             gh release view $tag --json tagName 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) { Write-Host 'Initial release exists; this push only creates a build artifact.'; exit 0 }
+            if ($LASTEXITCODE -eq 0) { Write-Host 'This version is already published; push only creates a build artifact.'; exit 0 }
             $publish = $true
           }
           if (-not $publish) { Write-Host 'Build only. Publish a vX.Y.Z release or use Run workflow to publish.'; exit 0 }

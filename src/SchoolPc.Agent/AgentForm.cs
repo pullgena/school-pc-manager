@@ -63,7 +63,7 @@ public sealed class AgentForm : Form
         buttons.Controls.AddRange([Ui.Button("연결 대기 시작", (_, _) => StartListening(), true), Ui.Button("대기·제어 종료", (_, _) => StopListening()),
             Ui.Button("관리자 등록 파일 저장", (_, _) => ExportPairing()), Ui.Button("등록 키 변경", (_, _) => RotateToken()),
             Ui.Button("관리자에게 파일 보내기", async (_, _) => await SendLocalFile()), Ui.Button("받은 파일 열기", (_, _) => OpenInbox()),
-            Ui.Button("업데이트 확인", async (_, _) => await Updater.CheckAsync(this, ShutdownAsync))]);
+            Ui.Button("Windows Wi-Fi 관리", (_, _) => new WifiForm().Show(this)), Ui.Button("현재 프로그램 제거", async (_, _) => await Removal.RequestAsync(this, ShutdownAsync)), Ui.Button("업데이트 확인", async (_, _) => await Updater.CheckAsync(this, ShutdownAsync))]);
         layout.Controls.Add(buttons, 0, 2);
         layout.Controls.Add(status, 0, 3); layout.Controls.Add(lockStatus, 0, 4); layout.Controls.Add(log, 0, 5);
         layout.Controls.Add(Ui.Label("접속 시 이 PC에서 승인합니다. 긴급 종료: Ctrl+Alt+F12 · 잠금은 최대 120초\nWindows 로그인 화면과 UAC 보안 화면은 원격 제어하지 않습니다."), 0, 6);
@@ -195,6 +195,8 @@ public sealed class AgentForm : Form
                             await Ui.OnUi(this, () => { AddLog("파일 받기 완료: " + Path.GetFileName(saved), audit: false); return true; });
                             Storage.Audit("agent", "파일 받기 완료");
                             await channel.SendAsync(new("notice", Text: "관리 대상 PC의 받은 파일 폴더에 저장되었습니다."), stop.Token); break;
+                        case "network-settings":
+                            await Ui.OnUi(this, () => { input.Unlock(); new WifiForm().Show(this); AddLog("관리자 Wi-Fi 관리 창 열기 요청"); return true; }); break;
                         case "request-file":
                             _ = SendLocalFile(); break;
                         case "power":
