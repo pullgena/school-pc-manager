@@ -95,7 +95,7 @@ public sealed class AgentForm : Form
             using var created = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(5));
             File.WriteAllBytes(path, UserSecret.Protect(created.Export(X509ContentType.Pfx, "")));
         }
-        return X509CertificateLoader.LoadPkcs12(UserSecret.Unprotect(File.ReadAllBytes(path)), "", X509KeyStorageFlags.EphemeralKeySet);
+        return X509CertificateLoader.LoadPkcs12(UserSecret.Unprotect(File.ReadAllBytes(path)), "", X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.PersistKeySet);
     }
     private static string LocalAddress()
     {

@@ -57,7 +57,7 @@ public sealed class AdminConnection(Pairing pairing) : IDisposable
     }
     private async Task ReadLoop()
     {
-        string inbox = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "SchoolPc 받은 파일", SafeFolder(pairing.Name));
+        string inbox = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "SchoolPc 받은 파일", "PC-" + SafeFolder(pairing.Name));
         using var receiver = new FileReceiver(inbox);
         try
         {

@@ -103,7 +103,9 @@ await Test("updater validates repository, version and GitHub digest", () =>
 await Test("real TLS channel with pinned certificate and invalid pin rejection", async () =>
 {
     using var rsa = RSA.Create(2048); var request = new CertificateRequest("CN=test", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-    using var cert = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+    using var created = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+    // Windows Schannel requires a persisted private key when acting as TLS server.
+    using var cert = X509CertificateLoader.LoadPkcs12(created.Export(X509ContentType.Pfx, ""), "", OperatingSystem.IsWindows() ? X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.PersistKeySet : X509KeyStorageFlags.EphemeralKeySet);
     var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start(); int port = ((IPEndPoint)listener.LocalEndpoint).Port;
     using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
     try
