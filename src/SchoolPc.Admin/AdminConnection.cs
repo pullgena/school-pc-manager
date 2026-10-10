@@ -7,9 +7,10 @@ using Channel = SchoolPc.Core.Channel;
 
 namespace SchoolPc.Admin;
 
-public sealed class AdminConnection(Pairing pairing) : IDisposable
+public sealed class AdminConnection : IDisposable
 {
-    public Pairing Pairing { get; } = pairing;
+    public Pairing Pairing { get; }
+    public AdminConnection(Pairing pairing) { Pairing = pairing; }
     private TcpClient? client;
     private Channel? channel;
     private readonly CancellationTokenSource stop = new();
@@ -21,20 +22,20 @@ public sealed class AdminConnection(Pairing pairing) : IDisposable
     public bool Connected => channel != null && !stop.IsCancellationRequested;
     public async Task ConnectAsync()
     {
-        pairing.Validate(); client = new TcpClient { NoDelay = true };
+        Pairing.Validate(); client = new TcpClient { NoDelay = true };
         try
         {
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stop.Token); deadline.CancelAfter(TimeSpan.FromSeconds(10));
-            await client.ConnectAsync(pairing.Host, pairing.Port, deadline.Token);
-            var tls = new SslStream(client.GetStream(), false, (_, cert, _, _) => cert != null && Security.EqualHash(Security.Hash(cert.GetRawCertData()), pairing.Fingerprint));
+            await client.ConnectAsync(Pairing.Host, Pairing.Port, deadline.Token);
+            var tls = new SslStream(client.GetStream(), false, (_, cert, _, _) => cert != null && Security.EqualHash(Security.Hash(cert.GetRawCertData()), Pairing.Fingerprint));
             channel = new Channel(tls);
             await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "SchoolPcAgent", EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13 }, deadline.Token);
-            await channel.SendAsync(new("hello", Text: pairing.Token), deadline.Token);
+            await channel.SendAsync(new("hello", Text: Pairing.Token), deadline.Token);
             using var approval = CancellationTokenSource.CreateLinkedTokenSource(stop.Token); approval.CancelAfter(TimeSpan.FromSeconds(40));
             var response = await channel.ReadAsync(approval.Token);
             if (response.Type != "accepted") throw new InvalidOperationException(response.Text.Length == 0 ? "관리 대상에서 접속을 거절했습니다." : response.Text);
             Interlocked.Exchange(ref lastPong, Environment.TickCount64);
-            receiveTask = ReadLoop(); heartbeatTask = Heartbeat(); Storage.Audit("admin", "연결: " + pairing.Name);
+            receiveTask = ReadLoop(); heartbeatTask = Heartbeat(); Storage.Audit("admin", "연결: " + Pairing.Name);
         }
         catch { Dispose(); throw; }
     }
@@ -57,7 +58,7 @@ public sealed class AdminConnection(Pairing pairing) : IDisposable
     }
     private async Task ReadLoop()
     {
-        string inbox = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "SchoolPc 받은 파일", "PC-" + SafeFolder(pairing.Name));
+        string inbox = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "SchoolPc 받은 파일", "PC-" + SafeFolder(Pairing.Name));
         using var receiver = new FileReceiver(inbox);
         try
         {

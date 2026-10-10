@@ -7,7 +7,8 @@ namespace SchoolPc.Windows;
 
 public static class Storage
 {
-    public static string Root => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SchoolPcManager");
+    internal static string? TestRoot { get; set; }
+    public static string Root => TestRoot ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SchoolPcManager");
     public static string PathFor(string name) { Directory.CreateDirectory(Root); return Path.Combine(Root, name); }
     public static void Save<T>(string name, T value)
     {

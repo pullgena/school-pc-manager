@@ -1,8 +1,11 @@
+using System.ComponentModel;
+
 namespace SchoolPc.Admin;
 
 public sealed class ScreenView : Control
 {
     private Image? image;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool RemoteInput { get; set; }
     public event Action<int, int>? MoveRemote;
     public event Action<int, bool>? ButtonRemote;
