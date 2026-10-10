@@ -100,6 +100,12 @@ public sealed class AgentForm : Form
         }
         return X509CertificateLoader.LoadPkcs12(UserSecret.Unprotect(File.ReadAllBytes(path)), "", X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.PersistKeySet);
     }
+    private static string LocalMac(string address)
+    {
+        var adapter = NetworkInterface.GetAllNetworkInterfaces().FirstOrDefault(n => n.OperationalStatus == OperationalStatus.Up && n.GetIPProperties().UnicastAddresses.Any(a => a.Address.ToString() == address));
+        string mac = adapter?.GetPhysicalAddress().ToString() ?? "";
+        return mac.Length == 12 ? mac : "";
+    }
     private static string LocalAddress()
     {
         try
@@ -332,7 +338,7 @@ public sealed class AgentForm : Form
         try
         {
             if (listener == null) SaveFields();
-            var pairing = new Pairing(settings.Name, host.Text.Trim(), settings.Port, Security.Hash(certificate.RawData), settings.Token); pairing.Validate();
+            var pairing = new Pairing(settings.Name, host.Text.Trim(), settings.Port, Security.Hash(certificate.RawData), settings.Token, LocalMac(host.Text.Trim())); pairing.Validate();
             using var picker = new SaveFileDialog { FileName = "pc-registration.json", Filter = "등록 파일 (*.json)|*.json" };
             if (picker.ShowDialog(this) != DialogResult.OK) return;
             File.WriteAllText(picker.FileName, JsonSerializer.Serialize(pairing, new JsonSerializerOptions { WriteIndented = true }));

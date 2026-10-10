@@ -40,7 +40,7 @@ public sealed class AdminForm : Form
         sidebar.RowStyles.Add(new(SizeType.AutoSize)); sidebar.RowStyles.Add(new(SizeType.Percent, 100)); sidebar.RowStyles.Add(new(SizeType.AutoSize));
         var add = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         add.Controls.AddRange([Ui.Button("PC 추가", (_, _) => Import(), true),
-            Ui.MenuButton("PC 설정", Ui.MenuItem("주소·포트 변경", (_, _) => EditAddress()), Ui.MenuItem("등록 삭제…", (_, _) => Remove()))]);
+            Ui.MenuButton("PC 설정", Ui.MenuItem("전원 켜기 (WOL)", async (_, _) => await WakeSelected()), Ui.MenuItem("주소·포트·MAC 변경", (_, _) => EditAddress()), Ui.MenuItem("등록 삭제…", (_, _) => Remove()))]);
         sidebar.Controls.Add(add, 0, 0); sidebar.Controls.Add(list, 0, 1);
         sidebar.Controls.Add(Ui.Button("선택한 PC 연결", async (_, _) => await ConnectSelected(), true), 0, 2);
         layout.Controls.Add(sidebar, 0, 1);
@@ -84,13 +84,27 @@ public sealed class AdminForm : Form
     private void EditAddress()
     {
         if (list.SelectedItem is not Pairing p) return;
-        using var dialog = new Form { Text = p.Name + " · 연결 설정", Size = new Size(440, 300), StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false };
+        using var dialog = new Form { Text = p.Name + " · 연결 설정", Size = new Size(440, 400), StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false };
         var fields = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), FlowDirection = FlowDirection.TopDown };
         var hostField = new TextBox { Text = p.Host, Width = 320 };
+        var macField = new TextBox { Text = p.Mac, Width = 320, PlaceholderText = "AA-BB-CC-DD-EE-FF (전원 켜기용)" };
         var portField = new NumericUpDown { Minimum = 1024, Maximum = 65535, Value = p.Port, Width = 110 };
-        fields.Controls.AddRange([Ui.Label("PC 주소"), hostField, Ui.Label("포트"), portField,
-            Ui.Button("저장", (_, _) => { address.Text = hostField.Text; port.Value = portField.Value; SaveAddress(); dialog.Close(); }, true)]);
+        fields.Controls.AddRange([Ui.Label("PC 주소"), hostField, Ui.Label("포트"), portField, Ui.Label("MAC 주소 (전원 켜기용, 선택 사항)"), macField,
+            Ui.Button("저장", (_, _) => { try { var updated = p with { Host = hostField.Text.Trim(), Port = (int)portField.Value, Mac = macField.Text.Trim() }; updated.Validate(); profiles[profiles.IndexOf(p)] = updated; RefreshProfiles(); dialog.Close(); } catch (Exception e) { Ui.Error(dialog, e); } }, true)]);
         dialog.Controls.Add(fields); dialog.ShowDialog(this);
+    }
+    private async Task WakeSelected()
+    {
+        if (list.SelectedItem is not Pairing p) return;
+        try
+        {
+            if (string.IsNullOrWhiteSpace(p.Mac)) { MessageBox.Show(this, "켜기용 MAC 주소가 없습니다. 새 버전의 대상 프로그램에서 등록 파일을 다시 저장하거나 PC 설정에서 MAC 주소를 입력해 주세요.", "전원 켜기"); return; }
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await WakeOnLan.SendAsync(p.Mac, deadline.Token);
+            summary.Text = p.Name + "에 켜기 신호를 보냈습니다. 켜짐을 확인한 뒤 목록에서 연결하세요.";
+            MessageBox.Show(this, "켜기 신호를 보냈습니다. 실제 켜짐 여부는 확인되지 않았습니다.\nBIOS·네트워크 장치의 WOL 지원과 전원 공급이 필요합니다.\nWi-Fi나 완전 종료 상태에서는 노트북 모델에 따라 지원되지 않습니다.\n켜진 뒤 대상 프로그램 실행 및 연결 승인이 필요합니다.", "전원 켜기");
+        }
+        catch (Exception e) { Ui.Error(this, e); }
     }
     private void SaveAddress()
     {

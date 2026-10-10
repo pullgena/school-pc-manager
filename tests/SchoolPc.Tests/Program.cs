@@ -137,4 +137,18 @@ await Test("real TLS channel with pinned certificate and invalid pin rejection",
     }
     finally { listener.Stop(); }
 });
+await Test("Wake-on-LAN magic packet, MAC validation, broadcast and legacy registration", () =>
+{
+    var packet = WakeOnLan.CreatePacket("02-11-22-33-44-55");
+    Assert(packet.Length == 102 && packet.Take(6).All(x => x == 255), "magic packet header");
+    byte[] mac = [2, 0x11, 0x22, 0x33, 0x44, 0x55];
+    for (int i = 0; i < 16; i++) Assert(packet.Skip(6 + i * 6).Take(6).SequenceEqual(mac), "MAC repetition");
+    foreach (string value in new[] { "bad", "00-00-00-00-00-00", "FF-FF-FF-FF-FF-FF", "01-11-22-33-44-55" }) Reject(() => WakeOnLan.CreatePacket(value));
+    Assert(WakeOnLan.Broadcast(IPAddress.Parse("192.168.5.42"), IPAddress.Parse("255.255.255.0")).ToString() == "192.168.5.255", "subnet broadcast");
+    var legacy = new Pairing("PC", "192.168.5.42", 45832, new string('A', 64), new string('B', 64));
+    using var oldJson = JsonDocument.Parse(JsonSerializer.Serialize(legacy));
+    var withoutMac = JsonSerializer.Serialize(oldJson.RootElement.EnumerateObject().Where(p => p.Name != "Mac").ToDictionary(p => p.Name, p => p.Value));
+    var restored = JsonSerializer.Deserialize<Pairing>(withoutMac)!; restored.Validate(); Assert(restored.Mac == "", "legacy registration compatibility");
+    return Task.CompletedTask;
+});
 Console.WriteLine($"All {count} tests passed.");

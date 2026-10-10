@@ -43,7 +43,7 @@ public sealed class Channel(Stream stream) : IDisposable
     public void Dispose() => stream.Dispose();
 }
 
-public sealed record Pairing(string Name, string Host, int Port, string Fingerprint, string Token)
+public sealed record Pairing(string Name, string Host, int Port, string Fingerprint, string Token, string Mac = "")
 {
     public void Validate()
     {
@@ -51,6 +51,7 @@ public sealed record Pairing(string Name, string Host, int Port, string Fingerpr
             throw new InvalidDataException("이름, 주소 또는 포트를 확인해 주세요.");
         if (!Security.ValidHash(Fingerprint) || Token.Length != 64 || !Token.All(Uri.IsHexDigit))
             throw new InvalidDataException("올바른 등록 파일이 아닙니다.");
+        if (!string.IsNullOrWhiteSpace(Mac)) _ = WakeOnLan.ParseMac(Mac);
     }
 }
 
