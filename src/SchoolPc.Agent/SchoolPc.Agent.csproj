@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><AssemblyName>SchoolPc.Agent</AssemblyName><ApplicationManifest>../SchoolPc.Windows/app.manifest</ApplicationManifest></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../SchoolPc.Windows/SchoolPc.Windows.csproj" /></ItemGroup>
+</Project>

@@ -1,0 +1,117 @@
+name: Build and release Windows apps
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '릴리스 버전 (예: 0.1.1)'
+        required: false
+        default: ''
+      publish:
+        description: '검증 후 정식 릴리스 게시'
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [xml]$props = Get-Content Directory.Build.props
+          $version = [string]$props.Project.PropertyGroup.Version
+          if ($env:EVENT_NAME -eq 'release') { $version = $env:RELEASE_TAG.TrimStart('v') }
+          elseif ($env:REF_TYPE -eq 'tag') { $version = $env:REF_NAME.TrimStart('v') }
+          elseif ($env:INPUT_VERSION) { $version = $env:INPUT_VERSION.TrimStart('v') }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must be major.minor.patch' }
+          "value=$version" >> $env:GITHUB_OUTPUT
+      - name: Test protocol, file transfer, TLS and update validation
+        shell: pwsh
+        run: dotnet run --project tests/SchoolPc.Tests -c Release
+      - name: Test Windows UI and input hook initialization
+        shell: pwsh
+        run: dotnet run --project tests/SchoolPc.WindowsSmoke -c Release
+      - name: Publish standalone administrator and agent
+        shell: pwsh
+        env:
+          BUILD_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($role in @('Admin', 'Agent')) {
+            dotnet publish "src/SchoolPc.$role/SchoolPc.$role.csproj" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:Version=$env:BUILD_VERSION -o "out/$role"
+            if ($LASTEXITCODE -ne 0) { throw "Publish failed: $role" }
+          }
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item out/Admin/SchoolPc.Admin.exe release/
+          Copy-Item out/Agent/SchoolPc.Agent.exe release/
+          Copy-Item docs/사용방법.md release/
+          $checksums = Get-ChildItem release/*.exe | ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)" }
+          $checksums | Set-Content release/SHA256SUMS.txt -Encoding utf8
+          Compress-Archive -Path release/* -DestinationPath SchoolPc-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SchoolPc-Windows-x64-${{ steps.version.outputs.value }}
+          path: |
+            release/
+            SchoolPc-Windows-x64.zip
+          retention-days: 30
+      - name: Upload release assets or create the initial release
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_VERSION: ${{ steps.version.outputs.value }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          PUBLISH_REQUESTED: ${{ inputs.publish }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = "v$env:BUILD_VERSION"
+          $publish = $env:EVENT_NAME -eq 'release' -or $env:REF_TYPE -eq 'tag' -or $env:PUBLISH_REQUESTED -eq 'true'
+          $initial = $env:EVENT_NAME -eq 'push' -and $env:REF_TYPE -eq 'branch' -and $env:BUILD_VERSION -eq '0.1.0'
+          if ($initial) {
+            gh release view $tag --json tagName 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { Write-Host 'Initial release exists; this push only creates a build artifact.'; exit 0 }
+            $publish = $true
+          }
+          if (-not $publish) { Write-Host 'Build only. Publish a vX.Y.Z release or use Run workflow to publish.'; exit 0 }
+          gh release view $tag --json tagName 2>$null | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --target $env:COMMIT_SHA --title "School PC $tag" --notes-file docs/릴리스노트.md release/SchoolPc.Admin.exe release/SchoolPc.Agent.exe release/SHA256SUMS.txt release/사용방법.md SchoolPc-Windows-x64.zip
+            if ($LASTEXITCODE -ne 0) { throw 'Release creation failed' }
+          } else {
+            # Do not overwrite executable assets for an existing version. Updates require a new tag.
+            $names = gh release view $tag --json assets --jq '.assets[].name'
+            if ($LASTEXITCODE -ne 0) { throw 'Could not list release assets' }
+            foreach ($file in Get-ChildItem release/*) {
+              if ($file.Name -notin $names) { gh release upload $tag $file.FullName; if ($LASTEXITCODE -ne 0) { throw 'Asset upload failed' } }
+            }
+            if ('SchoolPc-Windows-x64.zip' -notin $names) { gh release upload $tag SchoolPc-Windows-x64.zip; if ($LASTEXITCODE -ne 0) { throw 'ZIP upload failed' } }
+          }

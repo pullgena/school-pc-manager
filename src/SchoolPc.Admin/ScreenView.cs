@@ -1,0 +1,54 @@
+namespace SchoolPc.Admin;
+
+public sealed class ScreenView : Control
+{
+    private Image? image;
+    public bool RemoteInput { get; set; }
+    public event Action<int, int>? MoveRemote;
+    public event Action<int, bool>? ButtonRemote;
+    public event Action<int>? WheelRemote;
+    public event Action<int, bool>? KeyRemote;
+    public event Action? ReleaseRemote;
+    public ScreenView()
+    {
+        Dock = DockStyle.Fill; BackColor = Color.FromArgb(20, 26, 39); TabStop = true;
+        SetStyle(ControlStyles.Selectable | ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+    }
+    public void SetFrame(Image value) { var previous = image; image = value; previous?.Dispose(); Invalidate(); }
+    private Rectangle ImageArea()
+    {
+        if (image == null) return Rectangle.Empty;
+        double ratio = Math.Min(ClientSize.Width / (double)image.Width, ClientSize.Height / (double)image.Height);
+        int w = (int)(image.Width * ratio), h = (int)(image.Height * ratio);
+        return new((ClientSize.Width - w) / 2, (ClientSize.Height - h) / 2, w, h);
+    }
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        if (image == null) { TextRenderer.DrawText(e.Graphics, "연결 후 ‘화면 보기’를 켜 주세요", Font, ClientRectangle, Color.LightGray, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter); return; }
+        e.Graphics.DrawImage(image, ImageArea());
+        if (Focused && RemoteInput) ControlPaint.DrawBorder(e.Graphics, ClientRectangle, Color.CornflowerBlue, ButtonBorderStyle.Solid);
+    }
+    private bool Coordinate(Point p, out int x, out int y)
+    {
+        var area = ImageArea(); x = y = 0;
+        if (area.Width < 1 || area.Height < 1 || !area.Contains(p)) return false;
+        x = (int)Math.Round((p.X - area.Left) * 65535d / Math.Max(1, area.Width - 1));
+        y = (int)Math.Round((p.Y - area.Top) * 65535d / Math.Max(1, area.Height - 1)); return true;
+    }
+    protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); if (RemoteInput && Coordinate(e.Location, out int x, out int y)) MoveRemote?.Invoke(x, y); }
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e); Focus();
+        if (RemoteInput && Coordinate(e.Location, out int x, out int y)) { MoveRemote?.Invoke(x, y); ButtonRemote?.Invoke(Button(e.Button), true); Capture = true; }
+    }
+    protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); if (RemoteInput) ButtonRemote?.Invoke(Button(e.Button), false); Capture = false; }
+    protected override void OnMouseWheel(MouseEventArgs e) { base.OnMouseWheel(e); if (RemoteInput) WheelRemote?.Invoke(e.Delta); }
+    private static int Button(MouseButtons button) => button switch { MouseButtons.Left => 1, MouseButtons.Right => 2, MouseButtons.Middle => 3, _ => 1 };
+    protected override bool IsInputKey(Keys keyData) => RemoteInput || base.IsInputKey(keyData);
+    protected override bool ProcessDialogKey(Keys keyData) => RemoteInput || base.ProcessDialogKey(keyData);
+    protected override void OnKeyDown(KeyEventArgs e) { if (RemoteInput) { KeyRemote?.Invoke((int)e.KeyCode, true); e.Handled = true; e.SuppressKeyPress = true; } base.OnKeyDown(e); }
+    protected override void OnKeyUp(KeyEventArgs e) { if (RemoteInput) { KeyRemote?.Invoke((int)e.KeyCode, false); e.Handled = true; } base.OnKeyUp(e); }
+    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); ReleaseRemote?.Invoke(); Invalidate(); }
+    protected override void Dispose(bool disposing) { if (disposing) image?.Dispose(); base.Dispose(disposing); }
+}

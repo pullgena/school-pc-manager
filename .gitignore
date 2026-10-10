@@ -1,0 +1,14 @@
+**/bin/
+**/obj/
+out/
+release/
+*.zip
+*.pfx
+*.p12
+*.settings
+*.certificate
+*.log
+*.part
+*.previous
+pc-registration*.json
+.vs/
