@@ -444,7 +444,7 @@ public sealed class AgentForm : Form
     private void StopDisplay()
     {
         stoppingDisplay = true;
-        try { sharedScreen?.Dispose(); sharedScreen = null; input.Unlock(); }
+        try { sharedScreen?.Dispose(); sharedScreen = null; ClearCurtains(); input.Unlock(); }
         finally { stoppingDisplay = false; }
     }
     private void RequestPower(string action)

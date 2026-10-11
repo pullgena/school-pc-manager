@@ -115,6 +115,11 @@ internal sealed class TestRunner : Form
         var shared = Application.OpenForms.Cast<Form>().Single(f => f.Text.StartsWith("관리자 화면 공유"));
         if (!Descendants(shared).OfType<PictureBox>().Any(p => p.Image != null)) throw new Exception("Shared frame was not displayed");
         await connection.SendAsync(new("broadcast-stop")); await WaitUntil(() => shared.IsDisposed);
+        await connection.SendAsync(new("broadcast-start", Enabled: true));
+        await WaitUntil(() => Application.OpenForms.Cast<Form>().Any(f => f.Text.StartsWith("관리자 화면 공유")));
+        var exclusive = Application.OpenForms.Cast<Form>().Single(f => f.Text.StartsWith("관리자 화면 공유"));
+        if (exclusive.Bounds != Screen.PrimaryScreen!.Bounds || exclusive.FormBorderStyle != FormBorderStyle.None || !exclusive.TopMost) throw new Exception("Exclusive share did not cover the primary monitor");
+        await connection.SendAsync(new("broadcast-stop")); await WaitUntil(() => exclusive.IsDisposed);
         await connection.SendAsync(new("screen-lock", Enabled: true));
         await WaitUntil(() => Application.OpenForms.Cast<Form>().Any(f => Descendants(f).OfType<Label>().Any(l => l.Text.StartsWith("관리자 화면 잠금"))));
         await connection.SendAsync(new("unlock"));
