@@ -96,6 +96,7 @@ public sealed class AgentForm : Form
         input.Emergency += () => { if (!IsDisposed) BeginInvoke((Action)(() => StopListening())); };
         watchdog.Tick += (_, _) =>
         {
+            input.RefreshExpiredLocks();
             lockStatus.Text = input.MouseLocked || input.KeyboardLocked ? $"마우스: {(input.MouseLocked ? "잠금" : "사용 가능")} / 키보드: {(input.KeyboardLocked ? "잠금" : "사용 가능")} · {(input.Remaining < 0 ? "연결 중 ON" : input.Remaining + "초 뒤 해제")}" : "입력 잠금 없음";
             if (session is { } s && Environment.TickCount64 - Interlocked.Read(ref s.LastHeartbeat) > 15000) Disconnect("연결 응답 시간 초과");
         };

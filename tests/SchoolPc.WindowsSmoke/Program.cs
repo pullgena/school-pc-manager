@@ -86,7 +86,44 @@ internal sealed class TestRunner : Form
         using (var wifi = new WifiForm()) { wifi.CreateControl(); } // Never mutate runner network profiles.
         byte[] secret = [0, 1, 2, 3, 255];
         if (!UserSecret.Unprotect(UserSecret.Protect(secret)).SequenceEqual(secret)) throw new Exception("DPAPI round trip failed");
-        using (var input = new NativeInput()) { input.SetLocks(false, false); input.Unlock(); }
+        using (var input = new NativeInput())
+        {
+            if (input.MouseHookInstalled) throw new Exception("Unblocked local mouse has a global hook");
+            input.SetLocks(true, false, 0);
+            if (!input.MouseHookInstalled || !input.MouseLocked) throw new Exception("Mouse lock hook was not installed");
+            input.SetRemoteControlBlock(true); input.UnlockManual();
+            if (!input.MouseHookInstalled || !input.MouseLocked) throw new Exception("Manual unlock cleared remote mouse block");
+            input.SetRemoteControlBlock(false);
+            if (input.MouseHookInstalled || input.MouseLocked) throw new Exception("Remote mouse block left its hook installed");
+            input.SetLocks(true, false, 1); await Task.Delay(1100); input.RefreshExpiredLocks();
+            if (input.MouseHookInstalled || input.MouseLocked) throw new Exception("Expired mouse lock left its hook installed");
+            input.Unlock();
+        }
+        // Real viewport events: no hover motion while unfocused; captured drag clamps at the edge.
+        using (var mouseForm = new Form { Size = new Size(400, 300) })
+        using (var viewport = new ScreenView { RemoteInput = true })
+        using (var other = new TextBox { Dock = DockStyle.Top })
+        {
+            mouseForm.Controls.Add(viewport); mouseForm.Controls.Add(other); mouseForm.Show();
+            viewport.SetFrame(new Bitmap(400, 300));
+            var moves = new List<(int X, int Y)>(); var buttons = new List<bool>(); int releases = 0;
+            viewport.MoveRemote += (x, y) => moves.Add((x, y));
+            viewport.ButtonRemote += (_, down) => buttons.Add(down);
+            viewport.ReleaseRemote += () => releases++;
+            void Mouse(string method, int x, int y, MouseButtons button = MouseButtons.None) => typeof(Control)
+                .GetMethod(method, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .Invoke(viewport, [new MouseEventArgs(button, 1, x, y, 0)]);
+            other.Focus(); releases = 0; Mouse("OnMouseMove", viewport.Width / 2, viewport.Height / 2);
+            if (moves.Count != 0) throw new Exception("Unfocused viewport moved the target mouse");
+            Mouse("OnMouseDown", viewport.Width / 2, viewport.Height / 2, MouseButtons.Left);
+            Mouse("OnMouseMove", viewport.Width + 50, viewport.Height + 50);
+            Mouse("OnMouseUp", viewport.Width + 50, viewport.Height + 50, MouseButtons.Left);
+            if (moves.Count != 3 || !buttons.SequenceEqual([true, false]) || moves.Last() != (65535, 65535) || releases != 0) throw new Exception("Captured drag lost its edge movement or button release");
+            Mouse("OnMouseDown", viewport.Width / 2, viewport.Height / 2, MouseButtons.Left);
+            viewport.Capture = false;
+            if (releases == 0) throw new Exception("Lost capture did not release a held button");
+            mouseForm.Close();
+        }
         using (var admin = new AdminForm())
         {
             admin.Show(); await Task.Delay(100);

@@ -7,6 +7,7 @@ public sealed class ScreenView : Control
     private Image? image;
     private readonly RemoteWindowsKeys windowsKeys;
     private readonly HashSet<Keys> textKeys = [];
+    private readonly HashSet<int> pressedButtons = [];
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool RemoteInput { get; set; }
     public event Action<int, int>? MoveRemote;
@@ -42,17 +43,29 @@ public sealed class ScreenView : Control
     private bool Coordinate(Point p, out int x, out int y)
     {
         var area = ImageArea(); x = y = 0;
-        if (area.Width < 1 || area.Height < 1 || !area.Contains(p)) return false;
+        if (area.Width < 1 || area.Height < 1 || (!Capture && !area.Contains(p))) return false;
+        p = new Point(Math.Clamp(p.X, area.Left, area.Right - 1), Math.Clamp(p.Y, area.Top, area.Bottom - 1));
         x = (int)Math.Round((p.X - area.Left) * 65535d / Math.Max(1, area.Width - 1));
         y = (int)Math.Round((p.Y - area.Top) * 65535d / Math.Max(1, area.Height - 1)); return true;
     }
-    protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); if (RemoteInput && Coordinate(e.Location, out int x, out int y)) MoveRemote?.Invoke(x, y); }
+    protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); if (RemoteInput && Focused && Coordinate(e.Location, out int x, out int y)) MoveRemote?.Invoke(x, y); }
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e); Focus();
-        if (RemoteInput && Coordinate(e.Location, out int x, out int y)) { MoveRemote?.Invoke(x, y); ButtonRemote?.Invoke(Button(e.Button), true); Capture = true; }
+        if (RemoteInput && Coordinate(e.Location, out int x, out int y)) { pressedButtons.Add(Button(e.Button)); MoveRemote?.Invoke(x, y); ButtonRemote?.Invoke(Button(e.Button), true); Capture = true; }
     }
-    protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); if (RemoteInput) ButtonRemote?.Invoke(Button(e.Button), false); Capture = false; }
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        pressedButtons.Remove(Button(e.Button));
+        if (RemoteInput) { if (Coordinate(e.Location, out int x, out int y)) MoveRemote?.Invoke(x, y); ButtonRemote?.Invoke(Button(e.Button), false); }
+        if (pressedButtons.Count == 0) Capture = false;
+    }
+    protected override void OnMouseCaptureChanged(EventArgs e)
+    {
+        base.OnMouseCaptureChanged(e);
+        if (!Capture && pressedButtons.Count > 0) { pressedButtons.Clear(); ReleaseRemote?.Invoke(); }
+    }
     protected override void OnMouseWheel(MouseEventArgs e) { base.OnMouseWheel(e); if (RemoteInput) WheelRemote?.Invoke(e.Delta); }
     private static int Button(MouseButtons button) => button switch { MouseButtons.Left => 1, MouseButtons.Right => 2, MouseButtons.Middle => 3, _ => 1 };
     protected override bool IsInputKey(Keys keyData) => RemoteInput || base.IsInputKey(keyData);
@@ -81,6 +94,6 @@ public sealed class ScreenView : Control
         if (RemoteInput) { if (!textKey) KeyRemote?.Invoke((int)e.KeyCode, false); e.Handled = true; }
         base.OnKeyUp(e);
     }
-    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); textKeys.Clear(); ReleaseRemote?.Invoke(); Invalidate(); }
+    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); textKeys.Clear(); pressedButtons.Clear(); Capture = false; ReleaseRemote?.Invoke(); Invalidate(); }
     protected override void Dispose(bool disposing) { if (disposing) { windowsKeys.Dispose(); image?.Dispose(); } base.Dispose(disposing); }
 }
