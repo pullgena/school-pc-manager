@@ -53,6 +53,10 @@ public sealed class AgentForm : Form
     private readonly NotifyIcon tray = new() { Icon = SystemIcons.Application, Text = "School PC · 관리 대상", Visible = true };
     private readonly bool startInTray;
     private SharedScreenForm? sharedScreen;
+    private Cursor? focusCursor;
+    private SubmissionForm? submission;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource<bool>> submissionReplies = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource<bool>> savedReplies = new();
     private readonly List<Form> curtains = [];
     private bool stoppingDisplay;
     private int choosingFolder;
@@ -81,7 +85,7 @@ public sealed class AgentForm : Form
         buttons.Controls.AddRange([Ui.Button("연결 대기 시작", (_, _) => StartListening(), true),
             Ui.Button("관리자 등록 파일 저장", (_, _) => ExportPairing())]);
         var otherSettings = Ui.MenuButton("기타 설정", Ui.MenuItem("PC 이름·주소·포트", (_, _) => EditConnection()), Ui.MenuItem("등록 키 변경…", (_, _) => RotateToken()), Ui.MenuItem("등록 관리자 자동 허용 설정", (_, _) => ConfigureApproval()),
-                Ui.MenuItem("Windows 로그인 시 자동 실행", (_, _) => ConfigureStartup()), Ui.MenuItem("프로그램 종료", async (_, _) => await RequestExitAsync()), new ToolStripSeparator(),
+                Ui.MenuItem("프로그램 종료", async (_, _) => await RequestExitAsync()), new ToolStripSeparator(),
                 Ui.MenuItem("관리자에게 파일 보내기", async (_, _) => await SendLocalFile()), Ui.MenuItem("받은 파일 폴더", (_, _) => OpenInbox()),
                 Ui.MenuItem("Windows Wi-Fi 관리", (_, _) => new WifiForm().Show(this)), new ToolStripSeparator(),
                 Ui.MenuItem("업데이트 확인", async (_, _) => await Updater.CheckAsync(this, ShutdownAsync)), Ui.MenuItem("현재 프로그램 제거…", async (_, _) => await Removal.RequestAsync(this, ShutdownAsync)));
@@ -131,6 +135,16 @@ public sealed class AgentForm : Form
         key.Items.AddRange(EmergencyShortcut.AllowedKeys.Cast<object>().ToArray()); key.SelectedItem = (Keys)input.Shortcut.Key;
         var modifiers = new FlowLayoutPanel { AutoSize = true }; modifiers.Controls.AddRange([ctrl, alt, shift, key]);
         var result = Ui.Label("");
+        var startup = new CheckBox { Text = "Windows 로그인 시 자동 실행", AutoSize = true, Checked = StartupRegistration.Enabled };
+        bool updatingStartup = false;
+        startup.CheckedChanged += (_, _) =>
+        {
+            if (updatingStartup) return;
+            try { StartupRegistration.SetEnabled(startup.Checked); }
+            catch (Exception e) { Ui.Error(this, e); }
+            finally { updatingStartup = true; startup.Checked = StartupRegistration.Enabled; updatingStartup = false; }
+        };
+        Activated += (_, _) => { updatingStartup = true; startup.Checked = StartupRegistration.Enabled; updatingStartup = false; };
         fields.Controls.AddRange([Ui.Label("긴급 해제", 20),
             Ui.Button("긴급 제어 해제", (_, _) => StopListening()),
             Ui.Label("현재 연결과 대기를 종료하고 화면·마우스·키보드 잠금을 해제합니다."), current,
@@ -146,7 +160,7 @@ public sealed class AgentForm : Form
                     current.Text = "현재 긴급 해제 단축키: " + shortcut; result.Text = "저장했습니다. 다음 실행에도 적용됩니다.";
                 }
                 catch (Exception e) { Ui.Error(this, e); }
-            }, true), result, otherSettings]);
+            }, true), result, startup, otherSettings]);
         return fields;
     }
     internal async Task RequestExitAsync()
@@ -183,12 +197,6 @@ public sealed class AgentForm : Form
         if (MessageBox.Show(this, message, "등록 관리자 자동 허용", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         Disconnect("자동 허용 설정 변경"); settings = settings with { AutoApprove = enabled }; Storage.Save("agent.settings", settings);
         AddLog(enabled ? "등록 관리자 자동 허용 켜짐" : "등록 관리자 자동 허용 꺼짐");
-    }
-    private void ConfigureStartup()
-    {
-        bool enabled = !StartupRegistration.Enabled;
-        if (MessageBox.Show(this, enabled ? "Windows 로그인 시 트레이에서 자동 실행할까요?" : "Windows 로그인 시 자동 실행을 끌까요?", "자동 실행", MessageBoxButtons.YesNo) != DialogResult.Yes) return;
-        try { StartupRegistration.SetEnabled(enabled); AddLog(enabled ? "자동 실행 켜짐" : "자동 실행 꺼짐"); } catch (Exception e) { Ui.Error(this, e); }
     }
     private static X509Certificate2 LoadCertificate()
     {
@@ -290,7 +298,7 @@ public sealed class AgentForm : Form
             active = new(channel, stop, address) { FrameAcknowledgement = hello.Value >= 1, SequencedFrames = hello.Value >= 2 };
             await Ui.OnUi(this, () => { stop.Token.ThrowIfCancellationRequested(); session = active; status.Text = $"관리자 연결됨 · {address}"; tray.Text = "School PC · 관리자 연결됨";
                 tray.ShowBalloonTip(5000, "관리자 연결됨", "화면 공유·원격 제어 연결이 시작되었습니다.", ToolTipIcon.Info); AddLog("관리자 연결 승인: " + address); return true; });
-            await channel.SendAsync(new("accepted", Text: settings.Name, Value: 2), stop.Token);
+            await channel.SendAsync(new("accepted", Text: settings.Name, Value: 3), stop.Token);
             frames = Task.Run(() => ScreenLoop(active));
             while (!stop.IsCancellationRequested)
             {
@@ -300,6 +308,16 @@ public sealed class AgentForm : Form
                 {
                     switch (packet.Type)
                     {
+                        case "assignment-ready":
+                            if (submissionReplies.TryGetValue(packet.Id, out var ready)) ready.TrySetResult(packet.Enabled);
+                            break;
+                        case "file-saved":
+                            if (savedReplies.TryGetValue(packet.Id, out var receipt)) receipt.TrySetResult(packet.Enabled);
+                            break;
+                        case "assignment-request":
+                            var ticket = new SubmissionTicket(packet.Id, packet.Text, checked((int)packet.Size), packet.Value, Environment.TickCount64);
+                            await SessionUi(active, () => { OpenSubmission(active, ticket, (int)packet.Size); return true; });
+                            break;
                         case "exit-response":
                             if (exitRequests.TryGetValue(packet.Id, out var answer)) answer.TrySetResult(packet.Enabled);
                             break;
@@ -345,7 +363,7 @@ public sealed class AgentForm : Form
                         case "file-chunk": receiver.Chunk(packet); break;
                         case "file-end":
                             string saved = receiver.End(packet);
-                            await SessionUi(active, () => { AddLog("파일 받기 완료: " + Path.GetFileName(saved), audit: false); return true; });
+                            await SessionUi(active, () => { AddLog("파일 받기 완료: " + Path.GetFileName(saved), audit: false); FileArrival.Notify(this, saved); return true; });
                             Storage.Audit("agent", "파일 받기 완료");
                             await channel.SendAsync(new("notice", Text: "관리 대상 PC의 받은 파일 폴더 또는 선택한 폴더에 저장되었습니다: " + saved), stop.Token); break;
                         case "network-settings":
@@ -373,7 +391,7 @@ public sealed class AgentForm : Form
         {
             stop.Cancel(); client.Dispose();
             if (frames != null) { try { await frames; } catch { } }
-            try { await Ui.OnUi(this, () => { if (session == active && active != null) { ClearCurtains(); StopDisplay(); session = null; tray.Text = "School PC · 관리 대상"; input.Unlock(); input.ReleaseRemote(); status.Text = listener == null ? "연결 대기 꺼짐" : "연결 대기 중"; AddLog("관리자 연결 종료 · 입력 잠금 해제"); } return true; }); } catch (ObjectDisposedException) { }
+            try { await Ui.OnUi(this, () => { if (session == active && active != null) { submission?.EndRequest(); submission = null; ClearCurtains(); StopDisplay(); session = null; tray.Text = "School PC · 관리 대상"; input.Unlock(); input.ReleaseRemote(); status.Text = listener == null ? "연결 대기 꺼짐" : "연결 대기 중"; AddLog("관리자 연결 종료 · 입력 잠금 해제"); } return true; }); } catch (ObjectDisposedException) { }
             Interlocked.Exchange(ref busy, 0);
         }
     }
@@ -468,6 +486,48 @@ public sealed class AgentForm : Form
         catch (Exception e) { await Ui.OnUi(this, () => { Ui.Error(this, e); return true; }); }
         finally { s.SendFile.Release(); }
     }
+    private void OpenSubmission(AgentSession active, SubmissionTicket ticket, int seconds)
+    {
+        if (submission is { IsDisposed: false }) throw new InvalidOperationException("이미 과제 제출 창이 열려 있습니다.");
+        // File selection needs local input even if this PC was previously in a focus session.
+        active.ControlEnabled = active.PrivacyEnabled = false; StopDisplay(); ClearCurtains(); input.Unlock(); input.ReleaseRemote();
+        var form = new SubmissionForm(ticket.Id, ticket.Title, seconds, ticket.MaxFiles, files => Task.Run(() => SendSubmission(active, ticket.Id, files)));
+        submission = form;
+        form.FormClosed += async (_, _) =>
+        {
+            if (submission == form) submission = null;
+            if (!active.Stop.IsCancellationRequested)
+                try { await active.Channel.SendAsync(new("assignment-status", Id: ticket.Id, Enabled: form.Completed, Text: form.Completed ? "제출 완료" : "제출 창 닫힘 또는 시간 종료"), active.Stop.Token); } catch (Exception) { }
+        };
+        form.Show(); form.Activate();
+        _ = active.Channel.SendAsync(new("assignment-open", Id: ticket.Id), active.Stop.Token);
+    }
+    private async Task SendSubmission(AgentSession active, string requestId, string[] files)
+    {
+        if (!await active.SendFile.WaitAsync(0)) throw new IOException("다른 파일 전송이 진행 중입니다. 잠시 후 다시 제출해 주세요.");
+        try
+        {
+            var ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously); submissionReplies[requestId] = ready;
+            try
+            {
+                await active.Channel.SendAsync(new("assignment-submit", Id: requestId, Value: files.Length), active.Stop.Token);
+                if (!await ready.Task.WaitAsync(TimeSpan.FromSeconds(10), active.Stop.Token)) throw new IOException("제출 시간이 끝났거나 요청이 취소되었습니다.");
+            }
+            finally { submissionReplies.TryRemove(requestId, out _); }
+            foreach (string file in files)
+            {
+                string id = Guid.NewGuid().ToString("N"); var saved = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously); savedReplies[id] = saved;
+                try
+                {
+                    await FileSender.SendAsync(active.Channel, file, active.Stop.Token, requestId, id);
+                    if (!await saved.Task.WaitAsync(TimeSpan.FromSeconds(15), active.Stop.Token)) throw new IOException("파일 저장을 확인하지 못했습니다.");
+                }
+                finally { savedReplies.TryRemove(id, out _); }
+            }
+        }
+        catch { active.Stop.Cancel(); active.Channel.Dispose(); throw; }
+        finally { active.SendFile.Release(); }
+    }
     private async Task ChooseReceiveFolder(AgentSession active, FileReceiver receiver, Packet request)
     {
         if (Interlocked.CompareExchange(ref choosingFolder, 1, 0) != 0) return;
@@ -507,15 +567,16 @@ public sealed class AgentForm : Form
     private void StartDisplay(bool exclusive)
     {
         StopDisplay(); ClearCurtains(); if (session is { } s) s.PrivacyEnabled = false;
-        sharedScreen = new SharedScreenForm(exclusive);
-        sharedScreen.FormClosed += (_, _) => { if (!stoppingDisplay) { ClearCurtains(); input.UnlockManual(); sharedScreen = null; } };
+        if (exclusive) { focusCursor = InvisibleCursor.Create(); Cursor = Cursor.Current = focusCursor; }
+        sharedScreen = new SharedScreenForm(exclusive, focusCursor);
+        sharedScreen.FormClosed += (_, _) => { if (!stoppingDisplay) { ClearCurtains(); input.UnlockManual(); sharedScreen = null; Cursor = Cursor.Current = Cursors.Default; focusCursor?.Dispose(); focusCursor = null; } };
         if (exclusive)
         {
             input.SetLocks(true, true, 0);
             foreach (var screen in Screen.AllScreens.Where(s => !s.Primary))
             {
                 var cover = new Form { FormBorderStyle = FormBorderStyle.None, Bounds = screen.Bounds, StartPosition = FormStartPosition.Manual, TopMost = true, ShowInTaskbar = false, BackColor = Color.Black };
-                curtains.Add(cover); cover.Show();
+                cover.Cursor = focusCursor; curtains.Add(cover); cover.Show();
             }
         }
         sharedScreen.Show(); AddLog(exclusive ? "관리자 화면 공유 · 집중 모드" : "관리자 화면 공유 · 일반 모드");
@@ -523,7 +584,7 @@ public sealed class AgentForm : Form
     private void StopDisplay()
     {
         stoppingDisplay = true;
-        try { sharedScreen?.Dispose(); sharedScreen = null; ClearCurtains(); input.UnlockManual(); }
+        try { sharedScreen?.Dispose(); sharedScreen = null; ClearCurtains(); Cursor = Cursor.Current = Cursors.Default; focusCursor?.Dispose(); focusCursor = null; input.UnlockManual(); }
         finally { stoppingDisplay = false; }
     }
     private void RequestPower(string action)
@@ -556,6 +617,7 @@ public sealed class AgentForm : Form
     }
     private void Disconnect(string reason)
     {
+        submission?.EndRequest(); submission = null;
         ClearCurtains(); StopDisplay();
         input.Unlock(); input.ReleaseRemote();
         if (session is { } s) { s.ControlEnabled = s.ScreenEnabled = false; s.Stop.Cancel(); s.Channel.Dispose(); }
