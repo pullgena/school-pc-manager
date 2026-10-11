@@ -165,9 +165,15 @@ public sealed class AdminForm : Form
         sessions.Remove(panel.Connection.Pairing.Fingerprint); tabs.TabPages.Remove(tab); tab.Dispose(); UpdateWorkspace();
     }
     private void DisconnectAll() { foreach (var panel in sessions.Values) panel.Disconnect(); }
-    private static void OpenInbox()
+    private void OpenInbox()
     {
-        string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "SchoolPc 받은 파일");
-        Directory.CreateDirectory(path); System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+        try
+        {
+            string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "SchoolPc 받은 파일");
+            if (tabs.SelectedTab?.Controls[0] is SessionPanel panel) path = panel.Connection.AssignmentFolder ?? panel.Connection.ReceiveDirectory;
+            else if (list.SelectedItem is Pairing pairing) { using var preference = new AdminConnection(pairing); path = preference.ReceiveDirectory; }
+            Directory.CreateDirectory(path); System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+        }
+        catch (Exception e) { Ui.Error(this, e); }
     }
 }

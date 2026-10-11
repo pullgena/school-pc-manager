@@ -105,6 +105,32 @@ await Test("file receiver rejects oversized, out-of-order and corrupt transfers"
     finally { if (Directory.Exists(folder)) Directory.Delete(folder, true); }
     return Task.CompletedTask;
 });
+await Test("assignment deadlines, admission, cancellation and maximum file counts", () =>
+{
+    string id = Guid.NewGuid().ToString("N");
+    Reject(() => _ = new SubmissionTicket(id, "과제", 0, 1, 0));
+    Reject(() => _ = new SubmissionTicket(id, "과제", 60, 51, 0));
+    var expired = new SubmissionTicket(id, "과제", 1, 2, 0); Reject(() => expired.Start(1, 1000));
+    var ticket = new SubmissionTicket(id, "과제", 10, 2, 0);
+    Reject(ticket.CheckFile); Reject(() => ticket.Start(3, 1)); ticket.Start(2, 9999);
+    Reject(() => ticket.Start(1, 9999)); ticket.CompleteFile(); Assert(!ticket.Finished, "batch ended early");
+    ticket.CompleteFile(); Assert(ticket.Finished, "batch did not complete"); Reject(ticket.CompleteFile);
+    var cancelled = new SubmissionTicket(id, "과제", 10, 2, 0); cancelled.Cancel(); Reject(() => cancelled.Start(1, 1));
+    return Task.CompletedTask;
+});
+await Test("assignment transfer retains request and transfer IDs", async () =>
+{
+    string root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
+    try
+    {
+        string path = Path.Combine(root, "과제.txt"); File.WriteAllText(path, "과제");
+        string request = Guid.NewGuid().ToString("N"), transfer = Guid.NewGuid().ToString("N");
+        using var memory = new MemoryStream(); using var channel = new Channel(memory);
+        await FileSender.SendAsync(channel, path, CancellationToken.None, request, transfer); memory.Position = 0;
+        var begin = await channel.ReadAsync(CancellationToken.None); Assert(begin.Request == request && begin.Id == transfer, "assignment correlation lost");
+    }
+    finally { Directory.Delete(root, true); }
+});
 await Test("updater validates repository, version and GitHub digest", () =>
 {
     string name = "SchoolPc.Agent.exe";

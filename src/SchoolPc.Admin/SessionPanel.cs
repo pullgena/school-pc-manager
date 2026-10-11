@@ -28,6 +28,8 @@ public sealed class SessionPanel : UserControl
     private readonly CheckBox mouseLock = new() { Text = "마우스 잠금", AutoSize = true, Margin = new Padding(8) };
     private readonly CheckBox keyboardLock = new() { Text = "키보드 잠금", AutoSize = true, Margin = new Padding(8) };
     private readonly Label status = Ui.Label("대상 PC 접속 준비 중…");
+    private readonly Label receiveLocation = Ui.Label("");
+    private readonly Label submissionStatus = Ui.Label("과제 제출 요청이 없습니다.");
     private readonly SemaphoreSlim events = new(1);
     private int pendingEvents;
     private int pendingX = -1, pendingY;
@@ -50,7 +52,6 @@ public sealed class SessionPanel : UserControl
         var textInput = new ToolStripMenuItem("영문·문자 직접 입력") { Checked = true, CheckOnClick = true };
         textInput.CheckedChanged += (_, _) => { view.TextInput = textInput.Checked; status.Text = textInput.Checked ? "입력한 문자를 대상에 전달합니다." : "키 입력 모드 · 한글 IME는 대상 PC 상태를 따릅니다."; };
         toolbar.Controls.AddRange([control, blockLocal,
-            Ui.MenuButton("파일", Ui.MenuItem("받은 파일 저장 위치…", (_, _) => ChooseReceiveFolder()), Ui.MenuItem("파일 보내기", async (_, _) => await SendFile()), Ui.MenuItem("파일 받기 요청 (대상 선택)", async (_, _) => await RequestFile())),
             Ui.Button("전체 화면", (_, _) => FullScreen()),
             Ui.MenuButton("내 화면 공유", Ui.MenuItem("공유할 화면 선택…", (_, _) => SelectShareScreen()), Ui.MenuItem("일반 창으로 공유", async (_, _) => await StartSharing(false)), Ui.MenuItem("집중 모드로 공유", async (_, _) => await StartSharing(true)), Ui.MenuItem("공유 종료", async (_, _) => await StopSharing())),
             Ui.MenuButton("잠금", Ui.MenuItem("화면 잠금 ON/OFF", async (_, _) => { privacyLocked = !privacyLocked; await Run(new("screen-lock", Enabled: privacyLocked)); }), Ui.MenuItem("입력 잠금 ON/OFF…", (_, _) => ShowLocks()), Ui.MenuItem("입력 잠금 해제", async (_, _) => await Unlock()), new ToolStripSeparator(), Ui.MenuItem("Windows 잠금…", async (_, _) => await LockWindows())),
@@ -58,7 +59,16 @@ public sealed class SessionPanel : UserControl
             Ui.MenuButton("더 보기", showScreen, textInput, Ui.MenuItem("메시지 보내기", (_, _) => Message()), Ui.MenuItem("대상 Wi-Fi 관리 요청", async (_, _) => await Run(new("network-settings")))),
             Ui.Button("긴급 제어 중지", (_, _) => Disconnect()),
             Ui.Button("연결 끊기", (_, _) => Disconnect())]);
-        layout.Controls.Add(toolbar, 0, 0); layout.Controls.Add(view, 0, 2); layout.Controls.Add(status, 0, 3); Controls.Add(layout);
+        var filePanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(6), BackColor = Color.FromArgb(237, 243, 255) };
+        var fileButtons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        fileButtons.Controls.AddRange([Ui.Button("① 저장 폴더 선택", (_, _) => ChooseReceiveFolder()),
+            Ui.Button("② 과제 제출 요청", async (_, _) => await RequestAssignment(), true),
+            Ui.Button("③ 받은 폴더 열기", (_, _) => OpenReceiveFolder()),
+            Ui.Button("파일 보내기", async (_, _) => await SendFile())]);
+        receiveLocation.Text = "저장 위치: " + Connection.ReceiveDirectory;
+        receiveLocation.MaximumSize = new Size(850, 0);
+        filePanel.Controls.AddRange([fileButtons, receiveLocation, submissionStatus]);
+        layout.Controls.Add(toolbar, 0, 0); layout.Controls.Add(filePanel, 0, 1); layout.Controls.Add(view, 0, 2); layout.Controls.Add(status, 0, 3); Controls.Add(layout);
         screen.CheckedChanged += async (_, _) => { if (connected) await Run(new("screen", Enabled: screen.Checked)); };
         control.CheckedChanged += async (_, _) =>
         {
@@ -130,6 +140,13 @@ public sealed class SessionPanel : UserControl
     }
     private void Receive(Packet p)
     {
+        if (p.Type == "file-received") { Post(() => FileArrival.Notify(this, p.Text)); return; }
+        if (p.Type == "assignment-open")
+        {
+            Post(() => { control.Checked = false; mouseLock.Checked = keyboardLock.Checked = false; privacyLocked = false; if (sharing) _ = StopSharing(); submissionStatus.Text = "대상 PC에서 과제 제출 창을 열었습니다."; }); return;
+        }
+        if (p.Type == "assignment-progress") { Post(() => submissionStatus.Text = $"제출 저장 완료: {p.Value}/{p.Size}개" + (p.Value == p.Size ? " · 제출 완료" : " · 전송 중")); return; }
+        if (p.Type == "assignment-status") { Post(() => submissionStatus.Text = p.Enabled ? "과제 제출 완료 · 받은 폴더에서 확인하세요." : p.Text); return; }
         if (p.Type == "exit-request") { Post(() => _ = ApproveTargetExit(p)); return; }
         if (p.Type == "broadcast-ack") { Post(() => { if (p.Value == 0 || p.Value == shareSequence) shareAwaitingAck = false; }); return; }
         if (p.Type == "frame" && p.Data != null)
@@ -240,21 +257,43 @@ public sealed class SessionPanel : UserControl
     {
         sharing = false; shareGeneration++; shareTimer.Stop(); await Run(new("broadcast-stop"));
     }
-    private async Task RequestFile()
+    private async Task RequestAssignment()
     {
-        if (!ChooseReceiveFolder()) return;
-        await Run(new("request-file")); status.Text = "대상에서 보낼 파일을 선택하면 지정한 폴더로 복사됩니다.";
+        if (!Connection.Connected) { status.Text = "대상 PC에 먼저 연결해 주세요."; return; }
+        if (Connection.ReceiveFolder == null && !ChooseReceiveFolder()) return;
+        using var dialog = new Form { Text = "과제 제출 요청", Size = new Size(540, 390), StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false };
+        var title = new TextBox { Text = "과제 제출", MaxLength = 100, Width = 400 };
+        var minutes = new NumericUpDown { Minimum = 1, Maximum = 180, Value = 10, Width = 110 };
+        var count = new NumericUpDown { Minimum = 1, Maximum = 50, Value = 1, Width = 110 };
+        var fields = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), FlowDirection = FlowDirection.TopDown, WrapContents = false };
+        fields.Controls.AddRange([Ui.Label("과제 이름"), title, Ui.Label("제출 제한 시간 (분)"), minutes, Ui.Label("최대 제출 파일 개수"), count,
+            Ui.Button("제출 요청 보내기", async (_, _) =>
+            {
+                try { await Connection.RequestAssignmentAsync(title.Text.Trim(), (int)minutes.Value * 60, (int)count.Value); submissionStatus.Text = $"‘{title.Text}’ 요청 · {minutes.Value}분 · 최대 {count.Value}개"; dialog.Close(); }
+                catch (Exception e) { Ui.Error(dialog, e); }
+            }, true)]);
+        dialog.Controls.Add(fields); dialog.ShowDialog(this);
+    }
+    private void OpenReceiveFolder()
+    {
+        try { string folder = Connection.AssignmentFolder ?? Connection.ReceiveDirectory; Directory.CreateDirectory(folder); System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(folder) { UseShellExecute = true }); }
+        catch (Exception e) { Ui.Error(this, e); }
     }
     private bool ChooseReceiveFolder()
     {
         using var folder = new FolderBrowserDialog { Description = "관리자 PC에 받은 파일을 저장할 폴더 (대상이 직접 제출한 파일에도 적용)", UseDescriptionForTitle = true, SelectedPath = Connection.ReceiveFolder ?? "" };
         if (folder.ShowDialog(this) != DialogResult.OK) return false;
-        Connection.ReceiveFolder = folder.SelectedPath;
-        var preferences = Storage.Load<Dictionary<string, string>>("admin.receive-folders") ?? [];
-        preferences[Connection.Pairing.Fingerprint] = folder.SelectedPath;
-        Storage.Save("admin.receive-folders", preferences);
-        status.Text = "받은 파일 저장 위치: " + folder.SelectedPath;
+        SetReceiveFolder(folder.SelectedPath);
         return true;
+    }
+    internal void SetReceiveFolder(string folder)
+    {
+        Connection.ReceiveFolder = Path.GetFullPath(folder);
+        var preferences = Storage.Load<Dictionary<string, string>>("admin.receive-folders") ?? [];
+        preferences[Connection.Pairing.Fingerprint] = Connection.ReceiveFolder;
+        Storage.Save("admin.receive-folders", preferences);
+        receiveLocation.Text = "저장 위치: " + Connection.ReceiveDirectory;
+        status.Text = "저장 폴더를 선택했습니다. PC별 폴더로 나누어 저장합니다.";
     }
     private bool Post(Action action)
     {
@@ -302,9 +341,8 @@ public sealed class SessionPanel : UserControl
         if (picker.ShowDialog(this) != DialogResult.OK) return;
         try
         {
-            string proposed = Microsoft.VisualBasic.Interaction.InputBox("대상 PC의 저장 폴더 경로를 입력하세요. 대상에서 확인·선택합니다.\n비워 두면 대상에서 폴더를 직접 선택합니다.", "대상 저장 위치");
             status.Text = "대상에서 저장 폴더 확인을 기다립니다…";
-            string folder = await Connection.SelectTargetFolderAsync(proposed);
+            string folder = await Connection.SelectTargetFolderAsync("");
             status.Text = "파일 전송 중…"; await Connection.SendFileAsync(picker.FileName); status.Text = "전송 완료 · 대상 저장 위치: " + folder; }
         catch (Exception e) { status.Text = e.Message; }
     }

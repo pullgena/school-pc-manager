@@ -57,14 +57,14 @@ public sealed class FileReceiver(string folder) : IDisposable
 
 public static class FileSender
 {
-    public static async Task SendAsync(Channel channel, string path, CancellationToken ct)
+    public static async Task SendAsync(Channel channel, string path, CancellationToken ct, string requestId = "", string? transferId = null)
     {
         // Keep the same open stream through hashing and upload so content cannot change between them.
         await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileReceiver.ChunkSize, true);
         if (input.Length > FileReceiver.MaxFile) throw new InvalidDataException("파일은 최대 256MB까지 전송할 수 있습니다.");
-        string id = Guid.NewGuid().ToString("N");
+        string id = transferId ?? Guid.NewGuid().ToString("N");
         string hash = Convert.ToHexString(await SHA256.HashDataAsync(input, ct)); input.Position = 0;
-        await channel.SendAsync(new("file-begin", id, Security.SafeName(Path.GetFileName(path)), Size: input.Length, Hash: hash), ct);
+        await channel.SendAsync(new("file-begin", id, Security.SafeName(Path.GetFileName(path)), Size: input.Length, Hash: hash, Request: requestId), ct);
         byte[] bytes = new byte[FileReceiver.ChunkSize]; long offset = 0;
         int count;
         while ((count = await input.ReadAsync(bytes, ct)) > 0)

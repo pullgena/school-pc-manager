@@ -86,7 +86,7 @@ internal sealed class TestRunner : Form
         try
         {
             await receiving.ConnectAsync(); await WaitUntil(() => saved != null);
-            if (Path.GetDirectoryName(saved!) != folder || !File.ReadAllBytes(saved!).SequenceEqual(data)) throw new Exception("Target submission did not use the chosen folder");
+            if (Path.GetDirectoryName(saved!) != receiving.ReceiveDirectory || !File.ReadAllBytes(saved!).SequenceEqual(data)) throw new Exception("Target submission did not use the chosen per-PC folder");
         }
         finally { release.TrySetResult(); }
         await sending;
@@ -210,6 +210,7 @@ internal sealed class TestRunner : Form
         if (!Descendants(settingsPage).OfType<Button>().Any(b => b.Text == "긴급 제어 해제")) throw new Exception("Settings emergency release missing");
         var shortcutKey = Descendants(settingsPage).OfType<ComboBox>().Single(); shortcutKey.SelectedItem = Keys.F10;
         var modifiers = Descendants(settingsPage).OfType<CheckBox>().ToDictionary(c => c.Text);
+        if (modifiers["Windows 로그인 시 자동 실행"].Checked != StartupRegistration.Enabled) throw new Exception("Startup checkbox does not match registration");
         modifiers["Ctrl"].Checked = false; modifiers["Alt"].Checked = false;
         ClickButton(settingsPage, "단축키 저장");
         if (Storage.Load<AgentSettings>("agent.settings")!.Shortcut != EmergencyShortcut.Default) throw new Exception("Settings saved an invalid shortcut");
@@ -329,7 +330,9 @@ internal sealed class TestRunner : Form
         await WaitUntil(() => Application.OpenForms.Cast<Form>().Any(f => f.Text.StartsWith("관리자 화면 공유")));
         var exclusive = Application.OpenForms.Cast<Form>().Single(f => f.Text.StartsWith("관리자 화면 공유"));
         if (exclusive.Bounds != Screen.PrimaryScreen!.Bounds || exclusive.FormBorderStyle != FormBorderStyle.None || !exclusive.TopMost) throw new Exception("Exclusive share did not cover the primary monitor");
+        if (exclusive.Cursor.Handle == Cursors.Default.Handle || Descendants(exclusive).OfType<PictureBox>().Single().Cursor.Handle != exclusive.Cursor.Handle) throw new Exception("Focus mode did not hide the local cursor");
         await connection.SendAsync(new("broadcast-stop")); await WaitUntil(() => exclusive.IsDisposed);
+        if (agent.Cursor.Handle != Cursors.Default.Handle) throw new Exception("Focus cursor was not restored");
         await connection.SendAsync(new("screen-lock", Enabled: true));
         await WaitUntil(() => Application.OpenForms.Cast<Form>().Any(f => Descendants(f).OfType<Label>().Any(l => l.Text.StartsWith("관리자 화면 잠금"))));
         await connection.SendAsync(new("unlock"));
@@ -406,6 +409,30 @@ internal sealed class TestRunner : Form
             ClickButton(manager, "선택한 PC 연결");
             await WaitUntil(() => Descendants(manager).OfType<SessionPanel>().Any(p => p.Connection.Connected));
             var panel = Descendants(manager).OfType<SessionPanel>().Single();
+            typeof(SessionPanel).GetMethod("SetReceiveFolder", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(panel, [Storage.PathFor("assignment-inbox")]);
+            if (!Descendants(panel).OfType<Button>().Any(b => b.Text == "① 저장 폴더 선택") || !Descendants(panel).OfType<Button>().Any(b => b.Text == "② 과제 제출 요청")) throw new Exception("Easy file controls missing");
+            using (var bitmap = new Bitmap(manager.Width, manager.Height)) { manager.DrawToBitmap(bitmap, manager.ClientRectangle); bitmap.Save("out/previews/admin-files.png"); }
+            await panel.Run(new("control", Enabled: true, X: 1));
+            await WaitUntil(() => requestAgent.LocalMouseLocked && requestAgent.LocalKeyboardLocked);
+            await panel.Connection.RequestAssignmentAsync("CI 과제", 30, 2);
+            await WaitUntil(() => Application.OpenForms.Cast<Form>().Any(f => f.Text == "과제 제출 · CI 과제"));
+            var submission = (SubmissionForm)Application.OpenForms.Cast<Form>().Single(f => f.Text == "과제 제출 · CI 과제");
+            if (!submission.TopMost || requestAgent.LocalMouseLocked || requestAgent.LocalKeyboardLocked) throw new Exception("Submission window is not usable or topmost");
+            string secondFile = Storage.PathFor("second-homework.txt"); File.WriteAllText(secondFile, "두 번째 과제");
+            submission.SetFiles([file, secondFile, file]);
+            if (Descendants(submission).OfType<ListBox>().Single().Items.Count != 0) throw new Exception("Submission accepted too many files");
+            submission.SetFiles([file, secondFile]);
+            using (var bitmap = new Bitmap(submission.Width, submission.Height)) { submission.DrawToBitmap(bitmap, submission.ClientRectangle); bitmap.Save("out/previews/submission.png"); }
+            await submission.SubmitAsync();
+            await WaitUntil(() => submission.IsDisposed && panel.Connection.Assignment?.Finished == true);
+            var submitted = Directory.GetFiles(panel.Connection.AssignmentFolder!);
+            if (submitted.Length != 2 || !submitted.Any(f => File.ReadAllBytes(f).SequenceEqual(data)) || !submitted.Any(f => File.ReadAllText(f) == "두 번째 과제")) throw new Exception("Assignment batch was not saved correctly");
+            await WaitUntil(() => Application.OpenForms.Cast<Form>().Any(f => f is FileArrival));
+            foreach (var toast in Application.OpenForms.Cast<Form>().Where(f => f is FileArrival).ToArray()) toast.Close();
+            await panel.Connection.RequestAssignmentAsync("시간 종료 과제", 1, 1);
+            await WaitUntil(() => Application.OpenForms.Cast<Form>().Any(f => f.Text == "과제 제출 · 시간 종료 과제"));
+            await WaitUntil(() => !Application.OpenForms.Cast<Form>().Any(f => f.Text == "과제 제출 · 시간 종료 과제"));
+            await WaitUntil(() => panel.Connection.Assignment?.Cancelled == true);
             // Exercise the actual modal monitor selection, including its preview.
             using var choose = new System.Windows.Forms.Timer { Interval = 50 };
             choose.Tick += (_, _) =>

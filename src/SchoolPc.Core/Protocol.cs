@@ -6,7 +6,7 @@ using System.Text.Json;
 namespace SchoolPc.Core;
 
 public sealed record Packet(string Type, string Id = "", string Text = "", int X = 0, int Y = 0,
-    int Value = 0, bool Enabled = false, long Size = 0, string Hash = "", byte[]? Data = null);
+    int Value = 0, bool Enabled = false, long Size = 0, string Hash = "", byte[]? Data = null, string Request = "");
 
 /// <summary>Length-prefixed TLS payloads. Exactly one reader; concurrent writers are serialized.</summary>
 public sealed class Channel(Stream stream) : IDisposable

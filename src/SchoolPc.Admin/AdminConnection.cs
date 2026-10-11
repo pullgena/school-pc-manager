@@ -24,7 +24,12 @@ public sealed class AdminConnection : IDisposable
     private long lastPong;
     private volatile bool established;
     public bool FrameAcknowledgement { get; private set; }
+    public bool SupportsAssignments { get; private set; }
     public string? ReceiveFolder { get; set; }
+    public string ReceiveDirectory => Path.Combine(ReceiveFolder ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "SchoolPc 받은 파일"), "PC-" + SafeFolder(Pairing.Name) + "-" + Pairing.Fingerprint[..8]);
+    private readonly object assignmentGate = new();
+    public SubmissionTicket? Assignment { get; private set; }
+    public string? AssignmentFolder { get; private set; }
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource<string>> folderRequests = new();
     public event Action<string>? Progress;
     public event Action<Packet>? Received;
@@ -48,6 +53,7 @@ public sealed class AdminConnection : IDisposable
             var response = await channel.ReadAsync(approval.Token);
             if (response.Type != "accepted") throw new InvalidOperationException(response.Text.Length == 0 ? "관리 대상에서 접속을 거절했습니다." : response.Text);
             stop.Token.ThrowIfCancellationRequested();
+            SupportsAssignments = response.Value >= 3;
             FrameAcknowledgement = response.Value >= 1; established = true; Interlocked.Exchange(ref lastPong, Environment.TickCount64);
             receiveTask = Task.Run(ReadLoop); heartbeatTask = Task.Run(Heartbeat); Storage.Audit("admin", "연결: " + Pairing.Name);
         }
@@ -84,10 +90,23 @@ public sealed class AdminConnection : IDisposable
         }
         finally { folderRequests.TryRemove(id, out _); }
     }
+    public async Task RequestAssignmentAsync(string title, int seconds, int maxFiles)
+    {
+        if (!SupportsAssignments) throw new InvalidOperationException("과제 제출은 양쪽 프로그램을 v0.1.11 이상으로 업데이트한 뒤 사용할 수 있습니다.");
+        var ticket = new SubmissionTicket(Guid.NewGuid().ToString("N"), title, seconds, maxFiles, Environment.TickCount64);
+        lock (assignmentGate)
+        {
+            if (Assignment is { Cancelled: false, Finished: false } old && (old.Expected > 0 || Environment.TickCount64 < old.Deadline)) throw new InvalidOperationException("이미 과제 제출 요청이 진행 중입니다.");
+            Assignment = ticket; AssignmentFolder = Path.Combine(ReceiveDirectory, "과제-" + SafeFolder(title) + "-" + ticket.Id[..8]);
+        }
+        try { await SendAsync(new("assignment-request", Id: ticket.Id, Text: title, Value: maxFiles, Size: seconds)); }
+        catch { lock (assignmentGate) ticket.Cancel(); throw; }
+    }
     private async Task ReadLoop()
     {
-        string inbox = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "SchoolPc 받은 파일", "PC-" + SafeFolder(Pairing.Name));
+        string inbox = ReceiveDirectory;
         using var receiver = new FileReceiver(inbox);
+        string receivingRequest = "";
         try
         {
             while (!stop.IsCancellationRequested)
@@ -103,10 +122,43 @@ public sealed class AdminConnection : IDisposable
                             else pending.TrySetException(new IOException("대상에서 저장 폴더 선택을 취소했습니다."));
                         }
                         break;
-                    case "file-begin": receiver.SetFolder(ReceiveFolder ?? inbox); receiver.Begin(packet); break;
+                    case "assignment-submit":
+                        bool allowed = false; string error = "과제 요청이 유효하지 않습니다.";
+                        lock (assignmentGate)
+                        {
+                            try { if (Assignment?.Id != packet.Id) throw new InvalidDataException(error); Assignment.Start(packet.Value, Environment.TickCount64); allowed = true; }
+                            catch (InvalidDataException e) { error = e.Message; }
+                        }
+                        await channel.SendAsync(new("assignment-ready", Id: packet.Id, Enabled: allowed, Text: allowed ? "" : error), stop.Token);
+                        break;
+                    case "assignment-status":
+                        lock (assignmentGate) { if (Assignment?.Id == packet.Id && packet.Enabled == false) Assignment.Cancel(); }
+                        Received?.Invoke(packet); break;
+                    case "file-begin":
+                        lock (assignmentGate)
+                        {
+                            if (packet.Request.Length > 0)
+                            {
+                                if (Assignment?.Id != packet.Request) throw new InvalidDataException("알 수 없는 과제 제출입니다.");
+                                Assignment.CheckFile(); receiver.SetFolder(AssignmentFolder!);
+                            }
+                            else receiver.SetFolder(ReceiveDirectory);
+                            receiver.Begin(packet); receivingRequest = packet.Request;
+                        }
+                        break;
                     case "file-chunk": receiver.Chunk(packet); break;
                     case "file-end":
                         string saved = receiver.End(packet); Storage.Audit("admin", "파일 받기 완료");
+                        if (receivingRequest.Length > 0)
+                        {
+                            lock (assignmentGate)
+                            {
+                                Assignment!.CompleteFile();
+                                Received?.Invoke(new("assignment-progress", Id: receivingRequest, Value: Assignment.Completed, Size: Assignment.Expected, Text: AssignmentFolder!));
+                            }
+                        }
+                        if (SupportsAssignments) await channel.SendAsync(new("file-saved", Id: packet.Id, Enabled: true), stop.Token);
+                        Received?.Invoke(new("file-received", Text: saved)); receivingRequest = "";
                         Received?.Invoke(new("notice", Text: "파일 저장 완료: " + saved)); break;
                     default: Received?.Invoke(packet); break;
                 }
