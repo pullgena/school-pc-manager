@@ -29,6 +29,7 @@ public sealed class AdminForm : Form
         clickConnect.CheckedChanged += (_, _) => quickConnect.Checked = clickConnect.Checked;
         header.Controls.AddRange([Ui.Label("School PC", 22), Ui.Button("모두 연결", async (_, _) => await ConnectAll(), true),
             Ui.Button("모두 연결 끊기", (_, _) => DisconnectAll()),
+            Ui.Button("모든 PC 긴급 제어 중지", (_, _) => DisconnectAll()),
             Ui.MenuButton("설정", clickConnect, new ToolStripSeparator(),
                 Ui.MenuItem("모든 PC 화면 보기", async (_, _) => await ForAll(p => p.Run(new("screen", Enabled: true)))),
                 Ui.MenuItem("모든 PC 입력 잠금 해제", async (_, _) => await ForAll(p => p.Unlock())),

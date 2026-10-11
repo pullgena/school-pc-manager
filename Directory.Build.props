@@ -3,7 +3,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
-    <Version>0.1.8</Version>
+    <Version>0.1.9</Version>
     <Authors>pullgena</Authors>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <Deterministic>true</Deterministic>

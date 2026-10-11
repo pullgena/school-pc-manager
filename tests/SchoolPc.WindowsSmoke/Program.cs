@@ -299,6 +299,51 @@ internal sealed class TestRunner : Form
             using (var startupConnection = new AdminConnection(pairing)) { await startupConnection.ConnectAsync(); }
             await startupAgent.ExitAsync();
         }
+        using (var requestAgent = new AgentForm())
+        using (var manager = new AdminForm())
+        {
+            requestAgent.Show(); manager.Show(); await Task.Delay(200);
+            ClickButton(manager, "선택한 PC 연결");
+            await WaitUntil(() => Descendants(manager).OfType<SessionPanel>().Any(p => p.Connection.Connected));
+            var panel = Descendants(manager).OfType<SessionPanel>().Single();
+            // Exercise the actual modal monitor selection, including its preview.
+            using var choose = new System.Windows.Forms.Timer { Interval = 50 };
+            choose.Tick += (_, _) =>
+            {
+                var dialog = Application.OpenForms.Cast<Form>().FirstOrDefault(f => f.Text == "공유할 화면 선택");
+                if (dialog == null) return;
+                var options = Descendants(dialog).OfType<ComboBox>().Single();
+                if (options.Items.Count != Screen.AllScreens.Length || !Descendants(dialog).OfType<PictureBox>().Any(p => p.Image != null)) throw new Exception("Monitor choices or preview missing");
+                ClickButton(dialog, "선택");
+            }; choose.Start();
+            bool selected = (bool)typeof(SessionPanel).GetMethod("SelectShareScreen", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(panel, null)!;
+            choose.Stop(); if (!selected) throw new Exception("Monitor selection was cancelled");
+            using var jpeg = new MemoryStream(DesktopCapture.Jpeg(640, 55, device: Screen.PrimaryScreen!.DeviceName));
+            using var captured = Image.FromStream(jpeg);
+            if (captured.Width > 640 || captured.Width < 1) throw new Exception("Selected monitor capture size invalid");
+            bool missingRejected = false;
+            try { DesktopCapture.Jpeg(device: "missing-monitor"); } catch (IOException) { missingRejected = true; }
+            if (!missingRejected) throw new Exception("Missing monitor silently shared another display");
+            bool allow = false;
+            using var answer = new System.Windows.Forms.Timer { Interval = 50 };
+            answer.Tick += (_, _) =>
+            {
+                var dialog = Application.OpenForms.Cast<Form>().FirstOrDefault(f => f.Text == "대상 프로그램 종료 승인");
+                if (dialog != null) ClickButton(dialog, allow ? "종료 승인" : "거절");
+            }; answer.Start();
+            await requestAgent.RequestExitAsync();
+            if (requestAgent.IsDisposed || !panel.Connection.Connected) throw new Exception("Denied exit stopped the target");
+            await panel.Run(new("control", Enabled: true, X: 1));
+            await WaitUntil(() => requestAgent.LocalMouseLocked && requestAgent.LocalKeyboardLocked);
+            ClickButton(panel, "긴급 제어 중지");
+            await WaitUntil(() => !requestAgent.LocalMouseLocked && !requestAgent.LocalKeyboardLocked && !panel.Connection.Connected);
+            if (requestAgent.IsDisposed) throw new Exception("Emergency control stop exited the target app");
+            await Task.Delay(200); ClickButton(manager, "선택한 PC 연결");
+            await WaitUntil(() => Descendants(manager).OfType<SessionPanel>().Any(p => p.Connection.Connected));
+            allow = true; await requestAgent.RequestExitAsync();
+            await WaitUntil(() => requestAgent.IsDisposed);
+            answer.Stop(); manager.Close();
+        }
         using (var panel = new SessionPanel(pairing)) { panel.CreateControl(); }
         Console.WriteLine("PASS Windows DPAPI, hooks, forms, real Admin/Agent TLS consent, credential rejection, commands, file transfer and disconnect");
     }

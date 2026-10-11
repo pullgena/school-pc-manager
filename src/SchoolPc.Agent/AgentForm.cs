@@ -54,6 +54,8 @@ public sealed class AgentForm : Form
     private readonly List<Form> curtains = [];
     private bool stoppingDisplay;
     private int choosingFolder;
+    private int requestingExit;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource<bool>> exitRequests = new();
     private Task? acceptTask;
     private readonly HashSet<Task> handlers = [];
     private readonly object handlerGate = new();
@@ -75,7 +77,7 @@ public sealed class AgentForm : Form
         buttons.Controls.AddRange([Ui.Button("연결 대기 시작", (_, _) => StartListening(), true), Ui.Button("대기·제어 종료", (_, _) => StopListening()),
             Ui.Button("관리자 등록 파일 저장", (_, _) => ExportPairing()),
             Ui.MenuButton("설정", Ui.MenuItem("PC 이름·주소·포트", (_, _) => EditConnection()), Ui.MenuItem("등록 키 변경…", (_, _) => RotateToken()), Ui.MenuItem("등록 관리자 자동 허용 설정", (_, _) => ConfigureApproval()),
-                Ui.MenuItem("Windows 로그인 시 자동 실행", (_, _) => ConfigureStartup()), Ui.MenuItem("프로그램 종료", async (_, _) => await ExitAsync()), new ToolStripSeparator(),
+                Ui.MenuItem("Windows 로그인 시 자동 실행", (_, _) => ConfigureStartup()), Ui.MenuItem("프로그램 종료", async (_, _) => await RequestExitAsync()), new ToolStripSeparator(),
                 Ui.MenuItem("관리자에게 파일 보내기", async (_, _) => await SendLocalFile()), Ui.MenuItem("받은 파일 폴더", (_, _) => OpenInbox()),
                 Ui.MenuItem("Windows Wi-Fi 관리", (_, _) => new WifiForm().Show(this)), new ToolStripSeparator(),
                 Ui.MenuItem("업데이트 확인", async (_, _) => await Updater.CheckAsync(this, ShutdownAsync)), Ui.MenuItem("현재 프로그램 제거…", async (_, _) => await Removal.RequestAsync(this, ShutdownAsync)))]);
@@ -88,7 +90,7 @@ public sealed class AgentForm : Form
         var trayMenu = new ContextMenuStrip();
         trayMenu.Items.Add("창 열기", null, (_, _) => ShowWindow());
         trayMenu.Items.Add("긴급 제어 해제", null, (_, _) => StopListening());
-        trayMenu.Items.Add("프로그램 종료", null, async (_, _) => await ExitAsync());
+        trayMenu.Items.Add("프로그램 종료", null, async (_, _) => await RequestExitAsync());
         tray.ContextMenuStrip = trayMenu;
         tray.DoubleClick += (_, _) => ShowWindow();
         Shown += (_, _) => { StartListening(); if (this.startInTray) Hide(); };
@@ -112,6 +114,30 @@ public sealed class AgentForm : Form
         AddLog("등록 파일을 신뢰하는 관리자에게만 전달하세요. X 버튼은 트레이로 숨깁니다.");
     }
     private void ShowWindow() { Show(); WindowState = FormWindowState.Normal; Activate(); }
+    internal async Task RequestExitAsync()
+    {
+        if (Interlocked.Exchange(ref requestingExit, 1) != 0) return;
+        try
+        {
+            var active = session;
+            if (active == null || active.Stop.IsCancellationRequested) { await ExitAsync(); return; }
+            string id = Guid.NewGuid().ToString("N");
+            var answer = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            exitRequests[id] = answer;
+            try
+            {
+                AddLog("관리자에게 프로그램 종료 승인을 요청했습니다.");
+                await active.Channel.SendAsync(new("exit-request", Id: id), active.Stop.Token);
+                bool approved = await answer.Task.WaitAsync(TimeSpan.FromSeconds(35), active.Stop.Token);
+                if (approved && session == active && !active.Stop.IsCancellationRequested) await ExitAsync();
+                else AddLog("프로그램 종료가 승인되지 않았습니다.");
+            }
+            finally { exitRequests.TryRemove(id, out _); }
+        }
+        catch (Exception e) when (e is TimeoutException or OperationCanceledException or IOException or ObjectDisposedException)
+        { AddLog("종료 승인 응답을 받지 못했습니다. 프로그램은 계속 실행됩니다."); }
+        finally { Interlocked.Exchange(ref requestingExit, 0); }
+    }
     internal async Task ExitAsync() { exiting = true; await ShutdownAsync(); Close(); }
     private void ConfigureApproval()
     {
@@ -238,6 +264,9 @@ public sealed class AgentForm : Form
                 {
                     switch (packet.Type)
                     {
+                        case "exit-response":
+                            if (exitRequests.TryGetValue(packet.Id, out var answer)) answer.TrySetResult(packet.Enabled);
+                            break;
                         case "frame-ack": Interlocked.Exchange(ref active.FramePending, 0); break;
                         case "select-folder":
                             _ = ChooseReceiveFolder(active, receiver, packet); break;

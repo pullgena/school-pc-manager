@@ -12,9 +12,11 @@ public static class DesktopCapture
     [DllImport("user32.dll")] private static extern bool GetIconInfo(IntPtr icon, out IconInfo info);
     [DllImport("user32.dll")] private static extern bool DrawIconEx(IntPtr dc, int x, int y, IntPtr icon, int width, int height, int step, IntPtr brush, int flags);
     [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr obj);
-    public static byte[] Jpeg(int maxWidth = 1280, int quality = 55, bool blank = false)
+    public static byte[] Jpeg(int maxWidth = 1280, int quality = 55, bool blank = false, string? device = null)
     {
-        var bounds = Screen.PrimaryScreen!.Bounds;
+        var selected = device == null ? Screen.PrimaryScreen : Screen.AllScreens.FirstOrDefault(s => s.DeviceName == device);
+        if (selected == null) throw new IOException("선택한 모니터가 연결되어 있지 않습니다. 공유할 화면을 다시 선택해 주세요.");
+        var bounds = selected.Bounds;
         using var original = new Bitmap(bounds.Width, bounds.Height);
         using (var graphics = Graphics.FromImage(original))
         {
