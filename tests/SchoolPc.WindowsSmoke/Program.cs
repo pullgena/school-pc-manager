@@ -100,7 +100,7 @@ internal sealed class TestRunner : Form
         {
             using var tcp = await server.AcceptTcpClientAsync(timeout.Token);
             using var tls = new SslStream(tcp.GetStream());
-            await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = certificate }, timeout.Token);
+            await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = certificate, EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13 }, timeout.Token);
             using var wire = new SchoolPc.Core.Channel(tls);
             await wire.ReadAsync(timeout.Token); await wire.SendAsync(new("accepted", Value: 2), timeout.Token);
             await wire.SendAsync(new("frame", Value: 101, Data: [1, 2, 3]), timeout.Token);
@@ -125,7 +125,9 @@ internal sealed class TestRunner : Form
             }
         });
         using var panel = new SessionPanel(pairing with { Port = ((IPEndPoint)server.LocalEndpoint).Port });
-        Controls.Add(panel); panel.Show(); await panel.ConnectAsync();
+        Controls.Add(panel); panel.Show();
+        try { await panel.ConnectAsync(); }
+        catch { if (serving.IsFaulted) await serving; throw; }
         await WaitUntil(() => Volatile.Read(ref acknowledgements) == 2);
         var image = typeof(ScreenView).GetField("image", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
             .GetValue(Descendants(panel).OfType<ScreenView>().Single());
