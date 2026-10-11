@@ -16,6 +16,8 @@ public sealed class SessionPanel : UserControl
     private readonly System.Windows.Forms.Timer shareTimer = new() { Interval = 100 };
     private bool sharing, sharingBusy, shareAwaitingAck;
     private int shareGeneration;
+    private string? shareDevice;
+    private bool exitApprovalOpen;
     private bool privacyLocked;
     private readonly CheckBox screen = new() { Text = "화면 보기", AutoSize = true, Margin = new Padding(8) };
     private readonly CheckBox control = new() { Text = "원격 입력", AutoSize = true, Margin = new Padding(8) };
@@ -47,10 +49,11 @@ public sealed class SessionPanel : UserControl
         toolbar.Controls.AddRange([control, blockLocal,
             Ui.MenuButton("파일", Ui.MenuItem("받은 파일 저장 위치…", (_, _) => ChooseReceiveFolder()), Ui.MenuItem("파일 보내기", async (_, _) => await SendFile()), Ui.MenuItem("파일 받기 요청 (대상 선택)", async (_, _) => await RequestFile())),
             Ui.Button("전체 화면", (_, _) => FullScreen()),
-            Ui.MenuButton("내 화면 공유", Ui.MenuItem("일반 창으로 공유", async (_, _) => await StartSharing(false)), Ui.MenuItem("집중 모드로 공유", async (_, _) => await StartSharing(true)), Ui.MenuItem("공유 종료", async (_, _) => await StopSharing())),
+            Ui.MenuButton("내 화면 공유", Ui.MenuItem("공유할 화면 선택…", (_, _) => SelectShareScreen()), Ui.MenuItem("일반 창으로 공유", async (_, _) => await StartSharing(false)), Ui.MenuItem("집중 모드로 공유", async (_, _) => await StartSharing(true)), Ui.MenuItem("공유 종료", async (_, _) => await StopSharing())),
             Ui.MenuButton("잠금", Ui.MenuItem("화면 잠금 ON/OFF", async (_, _) => { privacyLocked = !privacyLocked; await Run(new("screen-lock", Enabled: privacyLocked)); }), Ui.MenuItem("입력 잠금 ON/OFF…", (_, _) => ShowLocks()), Ui.MenuItem("입력 잠금 해제", async (_, _) => await Unlock()), new ToolStripSeparator(), Ui.MenuItem("Windows 잠금…", async (_, _) => await LockWindows())),
             Ui.MenuButton("전원", Ui.MenuItem("재시작…", async (_, _) => await Power("restart")), Ui.MenuItem("전원 끄기…", async (_, _) => await Power("shutdown"))),
             Ui.MenuButton("더 보기", showScreen, textInput, Ui.MenuItem("메시지 보내기", (_, _) => Message()), Ui.MenuItem("대상 Wi-Fi 관리 요청", async (_, _) => await Run(new("network-settings")))),
+            Ui.Button("긴급 제어 중지", (_, _) => Disconnect()),
             Ui.Button("연결 끊기", (_, _) => Disconnect())]);
         layout.Controls.Add(toolbar, 0, 0); layout.Controls.Add(view, 0, 2); layout.Controls.Add(status, 0, 3); Controls.Add(layout);
         screen.CheckedChanged += async (_, _) => { if (connected) await Run(new("screen", Enabled: screen.Checked)); };
@@ -68,7 +71,8 @@ public sealed class SessionPanel : UserControl
             sharingBusy = true; int generation = shareGeneration;
             try
             {
-                byte[] bytes = await Task.Run(() => DesktopCapture.Jpeg(1280, 55));
+                string? device = shareDevice;
+                byte[] bytes = await Task.Run(() => DesktopCapture.Jpeg(1280, 55, device: device));
                 if (sharing && generation == shareGeneration) { shareAwaitingAck = true; await Connection.SendAsync(new("broadcast-frame", Data: bytes)); }
             }
             catch (Exception e) { sharing = false; shareTimer.Stop(); await Run(new("broadcast-stop")); status.Text = "내 화면 공유 중단: " + e.Message; }
@@ -116,6 +120,7 @@ public sealed class SessionPanel : UserControl
     }
     private void Receive(Packet p)
     {
+        if (p.Type == "exit-request") { Post(() => _ = ApproveTargetExit(p)); return; }
         if (p.Type == "broadcast-ack") { Post(() => shareAwaitingAck = false); return; }
         if (p.Type == "frame" && p.Data != null)
         {
@@ -159,10 +164,55 @@ public sealed class SessionPanel : UserControl
     }
     private async Task StartSharing(bool exclusive)
     {
-        if (!Connection.Connected) return;
+        if (!Connection.Connected || !SelectShareScreen()) return;
         shareGeneration++; sharing = false; shareAwaitingAck = false;
         await Run(new("broadcast-start", Enabled: exclusive)); sharing = true; shareTimer.Start();
         status.Text = exclusive ? "내 화면 공유 중 · 대상 집중 모드" : "내 화면 공유 중 · 대상은 다른 작업도 가능";
+    }
+    private bool SelectShareScreen()
+    {
+        var displays = Screen.AllScreens;
+        using var dialog = new Form { Text = "공유할 화면 선택", Size = new Size(600, 450), StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(16), RowCount = 3, ColumnCount = 1 };
+        layout.RowStyles.Add(new(SizeType.AutoSize)); layout.RowStyles.Add(new(SizeType.Percent, 100)); layout.RowStyles.Add(new(SizeType.AutoSize));
+        var choices = new ComboBox { Dock = DockStyle.Top, DropDownStyle = ComboBoxStyle.DropDownList };
+        choices.Items.AddRange(displays.Select((s, i) => (object)$"화면 {i + 1} · {s.DeviceName} · {s.Bounds.Width}×{s.Bounds.Height}{(s.Primary ? " (기본)" : "")}").ToArray());
+        var preview = new PictureBox { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.Black };
+        var caption = Ui.Label("선택한 모니터 전체 화면을 공유합니다.");
+        choices.SelectedIndexChanged += (_, _) =>
+        {
+            try
+            {
+                using var bytes = new MemoryStream(DesktopCapture.Jpeg(640, 55, device: displays[choices.SelectedIndex].DeviceName));
+                using var loaded = Image.FromStream(bytes); var old = preview.Image; preview.Image = new Bitmap(loaded); old?.Dispose();
+                caption.Text = "선택한 모니터 전체 화면을 공유합니다.";
+            }
+            catch (Exception e) { caption.Text = e.Message; }
+        };
+        var footer = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        footer.Controls.AddRange([caption, Ui.Button("선택", (_, _) => { shareDevice = displays[choices.SelectedIndex].DeviceName; shareGeneration++; shareAwaitingAck = false; dialog.DialogResult = DialogResult.OK; dialog.Close(); }, true), Ui.Button("취소", (_, _) => dialog.Close())]);
+        layout.Controls.Add(choices, 0, 0); layout.Controls.Add(preview, 0, 1); layout.Controls.Add(footer, 0, 2); dialog.Controls.Add(layout);
+        choices.SelectedIndex = Math.Max(0, Array.FindIndex(displays, s => s.DeviceName == shareDevice || (shareDevice == null && s.Primary)));
+        try { return dialog.ShowDialog(this) == DialogResult.OK; }
+        finally { preview.Image?.Dispose(); }
+    }
+    private async Task ApproveTargetExit(Packet request)
+    {
+        if (exitApprovalOpen) { await Run(new("exit-response", Id: request.Id, Enabled: false)); return; }
+        exitApprovalOpen = true;
+        try
+        {
+            using var dialog = new Form { Text = "대상 프로그램 종료 승인", Size = new Size(520, 280), StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false };
+            var content = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), FlowDirection = FlowDirection.TopDown };
+            content.Controls.AddRange([Ui.Label(Connection.Pairing.Name + "에서 프로그램 종료를 요청했습니다.\n승인하면 연결과 공유를 종료하고 대상 프로그램이 종료됩니다."),
+                Ui.Button("종료 승인", (_, _) => { dialog.DialogResult = DialogResult.Yes; dialog.Close(); }, true), Ui.Button("거절", (_, _) => { dialog.DialogResult = DialogResult.No; dialog.Close(); })]);
+            dialog.Controls.Add(content);
+            using var timeout = new System.Windows.Forms.Timer { Interval = 250 }; long until = Environment.TickCount64 + 30000;
+            timeout.Tick += (_, _) => { if (!Connection.Connected || Environment.TickCount64 >= until) dialog.Close(); }; timeout.Start();
+            bool approved = dialog.ShowDialog(this) == DialogResult.Yes;
+            if (Connection.Connected) await Run(new("exit-response", Id: request.Id, Enabled: approved));
+        }
+        finally { exitApprovalOpen = false; }
     }
     private async Task StopSharing()
     {
