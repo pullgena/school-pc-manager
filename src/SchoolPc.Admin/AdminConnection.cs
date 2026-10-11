@@ -47,6 +47,7 @@ public sealed class AdminConnection : IDisposable
             using var approval = CancellationTokenSource.CreateLinkedTokenSource(stop.Token); approval.CancelAfter(TimeSpan.FromSeconds(40));
             var response = await channel.ReadAsync(approval.Token);
             if (response.Type != "accepted") throw new InvalidOperationException(response.Text.Length == 0 ? "관리 대상에서 접속을 거절했습니다." : response.Text);
+            stop.Token.ThrowIfCancellationRequested();
             FrameAcknowledgement = response.Value >= 1; established = true; Interlocked.Exchange(ref lastPong, Environment.TickCount64);
             receiveTask = ReadLoop(); heartbeatTask = Heartbeat(); Storage.Audit("admin", "연결: " + Pairing.Name);
         }

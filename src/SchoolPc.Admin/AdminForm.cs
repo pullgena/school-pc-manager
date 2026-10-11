@@ -12,6 +12,7 @@ public sealed class AdminForm : Form
     private readonly NumericUpDown port = new() { Minimum = 1024, Maximum = 65535, Width = 85 };
     private readonly TabControl tabs = new() { Dock = DockStyle.Fill };
     private readonly Dictionary<string, SessionPanel> sessions = [];
+    private readonly HashSet<string> manuallyDisconnected = [];
     private readonly CheckBox quickConnect = new() { Text = "목록 클릭으로 바로 연결", AutoSize = true, Checked = true, Margin = new Padding(8) };
     private bool refreshing;
     private readonly Label empty = new() { Text = "PC를 추가하고 목록에서 선택하세요.\n연결되면 이곳에 화면이 표시됩니다.", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.SlateGray };
@@ -48,7 +49,11 @@ public sealed class AdminForm : Form
         layout.Controls.Add(workspace, 1, 1);
         layout.Controls.Add(summary, 0, 2); layout.SetColumnSpan(summary, 2); Controls.Add(layout);
         list.SelectedIndexChanged += (_, _) => { if (list.SelectedItem is Pairing p) { address.Text = p.Host; port.Value = p.Port; } };
-        list.MouseClick += async (_, _) => { if (!refreshing && quickConnect.Checked && list.SelectedItem is Pairing p) await Connect(p); };
+        list.MouseClick += async (_, e) =>
+        {
+            int index = list.IndexFromPoint(e.Location);
+            if (!refreshing && quickConnect.Checked && index >= 0 && list.Items[index] is Pairing p) await Connect(p, explicitRequest: false);
+        };
         FormClosing += (_, _) => DisconnectAll(); RefreshProfiles();
     }
     private void RefreshProfiles()
@@ -124,21 +129,29 @@ public sealed class AdminForm : Form
         profiles.Remove(p); RefreshProfiles();
     }
     private Task ConnectSelected() => list.SelectedItem is Pairing p ? Connect(p) : Task.CompletedTask;
-    private async Task Connect(Pairing p)
+    private async Task Connect(Pairing p, bool explicitRequest = true)
     {
+        if (!explicitRequest && manuallyDisconnected.Contains(p.Fingerprint))
+        {
+            summary.Text = p.Name + " 연결을 끊은 상태입니다. 다시 연결하려면 ‘선택한 PC 연결’을 누르세요.";
+            return;
+        }
+        if (explicitRequest) manuallyDisconnected.Remove(p.Fingerprint);
         if (sessions.TryGetValue(p.Fingerprint, out var existing))
         {
             if (existing.Connection.Connected || existing.IsConnecting) { tabs.SelectedTab = (TabPage)existing.Parent!; return; }
             var previous = (TabPage)existing.Parent!; sessions.Remove(p.Fingerprint); tabs.TabPages.Remove(previous); previous.Dispose();
         }
-        var panel = new SessionPanel(p); var tab = new TabPage(p.Name); tab.Controls.Add(panel); tabs.TabPages.Add(tab); tabs.SelectedTab = tab; sessions.Add(p.Fingerprint, panel); UpdateWorkspace();
+        var panel = new SessionPanel(p);
+        panel.DisconnectRequested += () => manuallyDisconnected.Add(p.Fingerprint);
+        var tab = new TabPage(p.Name); tab.Controls.Add(panel); tabs.TabPages.Add(tab); tabs.SelectedTab = tab; sessions.Add(p.Fingerprint, panel); UpdateWorkspace();
         try { summary.Text = p.Name + " 연결 중 · 아래 연결 진행 상태를 확인해 주세요."; await panel.ConnectAsync(); summary.Text = p.Name + " 연결 완료"; }
         catch (Exception e) { summary.Text = p.Name + ": " + e.Message; }
     }
     private async Task ConnectAll()
     {
         // One task per PC allows simultaneous consent prompts without blocking the administrator UI.
-        var snapshot = profiles.ToArray(); await Task.WhenAll(snapshot.Select(Connect)); summary.Text = "모든 등록 PC의 연결 시도를 마쳤습니다.";
+        var snapshot = profiles.ToArray(); await Task.WhenAll(snapshot.Select(p => Connect(p))); summary.Text = "모든 등록 PC의 연결 시도를 마쳤습니다.";
     }
     private async Task ForAll(Func<SessionPanel, Task> command)
     {
@@ -150,7 +163,7 @@ public sealed class AdminForm : Form
         if (tabs.SelectedTab is not { } tab || tab.Controls[0] is not SessionPanel panel) return;
         sessions.Remove(panel.Connection.Pairing.Fingerprint); tabs.TabPages.Remove(tab); tab.Dispose(); UpdateWorkspace();
     }
-    private void DisconnectAll() { foreach (var panel in sessions.Values) panel.Connection.Dispose(); }
+    private void DisconnectAll() { foreach (var panel in sessions.Values) panel.Disconnect(); }
     private static void OpenInbox()
     {
         string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "SchoolPc 받은 파일");

@@ -217,6 +217,38 @@ internal sealed class TestRunner : Form
             bool rejected = false; try { await invalidRemembered.ConnectAsync(); } catch { rejected = true; }
             if (!rejected) throw new Exception("Automatic approval bypassed credential validation");
         }
+        await WaitUntil(() => Descendants(agent).OfType<Label>().Any(l => l.Text == "연결 대기 중"));
+        await Task.Delay(200);
+        Storage.Save("admin.profiles", new List<Pairing> { pairing });
+        using (var workspace = new AdminForm())
+        {
+            workspace.Show();
+            var pcList = Descendants(workspace).OfType<ListBox>().Single();
+            var row = pcList.GetItemRectangle(0);
+            void ListClick(Point point) => typeof(Control).GetMethod("OnMouseClick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .Invoke(pcList, [new MouseEventArgs(MouseButtons.Left, 1, point.X, point.Y, 0)]);
+            ListClick(new Point(row.Left + 5, row.Top + 5));
+            await WaitUntil(() => Descendants(workspace).OfType<SessionPanel>().Any(p => p.Connection.Connected));
+            var first = Descendants(workspace).OfType<SessionPanel>().Single();
+            ClickButton(first, "연결 끊기");
+            await WaitUntil(() => !first.Connection.Connected && Descendants(agent).OfType<Label>().Any(l => l.Text == "연결 대기 중"));
+            ListClick(new Point(row.Left + 5, row.Top + 5)); await Task.Delay(300);
+            if (first.IsDisposed || first.IsConnecting || first.Connection.Connected) throw new Exception("List click reconnected a manually disconnected PC");
+            ListClick(new Point(5, pcList.ClientSize.Height - 5)); await Task.Delay(100);
+            if (first.IsDisposed || first.Connection.Connected) throw new Exception("Blank list click started a connection");
+            ClickButton(workspace, "선택한 PC 연결");
+            await WaitUntil(() => Descendants(workspace).OfType<SessionPanel>().Any(p => p.Connection.Connected));
+            if (!first.IsDisposed) throw new Exception("Explicit reconnect did not replace the stopped session");
+            var second = Descendants(workspace).OfType<SessionPanel>().Single();
+            ClickButton(workspace, "모두 연결 끊기");
+            await WaitUntil(() => !second.Connection.Connected && Descendants(agent).OfType<Label>().Any(l => l.Text == "연결 대기 중"));
+            ListClick(new Point(row.Left + 5, row.Top + 5)); await Task.Delay(300);
+            if (second.IsDisposed || second.IsConnecting || second.Connection.Connected) throw new Exception("Disconnect all allowed a list reconnect");
+            ClickButton(workspace, "모두 연결");
+            await WaitUntil(() => Descendants(workspace).OfType<SessionPanel>().Any(p => p.Connection.Connected));
+            workspace.Close();
+        }
+        await WaitUntil(() => Descendants(agent).OfType<Label>().Any(l => l.Text == "연결 대기 중"));
         agent.Close();
         if (agent.Visible || agent.IsDisposed) throw new Exception("Close did not keep agent in tray");
         await Task.Delay(200);
