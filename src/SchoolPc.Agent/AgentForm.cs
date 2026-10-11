@@ -276,7 +276,7 @@ public sealed class AgentForm : Form
                             string saved = receiver.End(packet);
                             await Ui.OnUi(this, () => { AddLog("파일 받기 완료: " + Path.GetFileName(saved), audit: false); return true; });
                             Storage.Audit("agent", "파일 받기 완료");
-                            await channel.SendAsync(new("notice", Text: "관리 대상 PC의 받은 파일 폴더에 저장되었습니다."), stop.Token); break;
+                            await channel.SendAsync(new("notice", Text: "관리 대상 PC의 받은 파일 폴더 또는 선택한 폴더에 저장되었습니다: " + saved), stop.Token); break;
                         case "network-settings":
                             await Ui.OnUi(this, () => { ClearCurtains(); active.PrivacyEnabled = false; StopDisplay(); input.Unlock(); new WifiForm().Show(this); AddLog("관리자 Wi-Fi 관리 창 열기 요청"); return true; }); break;
                         case "request-file":
