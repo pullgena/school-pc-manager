@@ -84,6 +84,7 @@ public static class Updater
             using (var input = File.OpenRead(source)) if (!Security.EqualHash(Convert.ToHexString(SHA256.HashData(input)), args[4])) throw new InvalidDataException("검증에 실패했습니다.");
             try { using var parent = Process.GetProcessById(pid); if (!parent.WaitForExit(30_000)) throw new IOException("이전 프로그램이 종료되지 않았습니다."); }
             catch (ArgumentException) { }
+            // Backup always lives next to the installed EXE, including installer deployments.
             backup = target + ".previous"; File.Copy(target, backup, true);
             File.Copy(source, target, true); replaced = true;
             _ = Process.Start(new ProcessStartInfo(target) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(target)! }) ?? throw new IOException("새 버전을 시작하지 못했습니다.");

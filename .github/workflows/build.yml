@@ -76,6 +76,24 @@ jobs:
           Copy-Item out/Admin/SchoolPc.Admin.exe release/
           Copy-Item out/Agent/SchoolPc.Agent.exe release/
           Copy-Item docs/사용방법.md release/
+      - name: Build installers
+        shell: pwsh
+        env:
+          BUILD_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = "${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y; if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed' } }
+          foreach ($role in @('Admin', 'Agent')) {
+            & $iscc "/DRole=$role" "/DAppVersion=$env:BUILD_VERSION" installer/SchoolPc.iss
+            if ($LASTEXITCODE -ne 0) { throw "Installer build failed: $role" }
+          }
+      - name: Test installation, backup, autostart and removal
+        shell: pwsh
+        run: ./installer/Verify-Installers.ps1
+      - name: Package release
+        shell: pwsh
+        run: |
           $checksums = Get-ChildItem release/*.exe | ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)" }
           $checksums | Set-Content release/SHA256SUMS.txt -Encoding utf8
           Compress-Archive -Path release/* -DestinationPath SchoolPc-Windows-x64.zip
@@ -111,7 +129,7 @@ jobs:
           if (-not $publish) { Write-Host 'Build only. Publish a vX.Y.Z release or use Run workflow to publish.'; exit 0 }
           gh release view $tag --json tagName 2>$null | Out-Null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --target $env:COMMIT_SHA --title "School PC $tag" --notes-file docs/릴리스노트.md release/SchoolPc.Admin.exe release/SchoolPc.Agent.exe release/SHA256SUMS.txt release/사용방법.md SchoolPc-Windows-x64.zip
+            gh release create $tag --target $env:COMMIT_SHA --title "School PC $tag" --notes-file docs/릴리스노트.md release/SchoolPc.Admin.exe release/SchoolPc.Agent.exe release/SchoolPc.Admin.Setup.exe release/SchoolPc.Agent.Setup.exe release/SHA256SUMS.txt release/사용방법.md SchoolPc-Windows-x64.zip
             if ($LASTEXITCODE -ne 0) { throw 'Release creation failed' }
           } else {
             # Do not overwrite executable assets for an existing version. Updates require a new tag.

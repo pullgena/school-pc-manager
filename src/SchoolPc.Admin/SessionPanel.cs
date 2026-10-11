@@ -135,7 +135,7 @@ public sealed class SessionPanel : UserControl
     }
     private async Task Power(string action)
     {
-        if (MessageBox.Show(this, "대상 PC에 전원 작업 승인을 요청할까요?\n대상에서 승인하면 60초 후 실행됩니다.", "전원 요청", MessageBoxButtons.YesNo) == DialogResult.Yes) await Run(new("power", Text: action));
+        if (MessageBox.Show(this, "대상 PC에 전원 작업을 요청할까요?\n자동 허용 상태이면 추가 승인 없이 60초 후 실행됩니다.", "전원 요청", MessageBoxButtons.YesNo) == DialogResult.Yes) await Run(new("power", Text: action));
     }
     private async Task LockWindows()
     {

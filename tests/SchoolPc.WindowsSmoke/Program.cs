@@ -12,7 +12,8 @@ internal static class Program
 {
     [STAThread] static int Main()
     {
-        ApplicationConfiguration.Initialize();
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
         Storage.TestRoot = Path.Combine(Path.GetTempPath(), "SchoolPcSmoke-" + Guid.NewGuid().ToString("N"));
         using var runner = new TestRunner(); Application.Run(runner);
         try { Directory.Delete(Storage.TestRoot, true); } catch (IOException) { }
@@ -94,7 +95,34 @@ internal sealed class TestRunner : Form
         if (!File.ReadAllBytes(received).SequenceEqual(data)) throw new Exception("Agent file bytes changed");
         File.Delete(received);
         connection.Dispose(); await WaitUntil(() => Descendants(agent).OfType<Label>().Any(l => l.Text == "연결 대기 중"));
-        ClickButton(agent, "대기·제어 종료"); agent.Close();
+        // The first approval remembered this registration; subsequent connections must not show a dialog.
+        await Task.Delay(200);
+        using (var automatic = new AdminConnection(pairing))
+        {
+            await automatic.ConnectAsync();
+            if (Application.OpenForms.Cast<Form>().Any(f => f.Text == "관리자 연결 승인")) throw new Exception("Remembered admin prompted again");
+            if (!Storage.Load<AgentSettings>("agent.settings")!.AutoApprove) throw new Exception("Approval was not persisted");
+        }
+        await WaitUntil(() => Descendants(agent).OfType<Label>().Any(l => l.Text == "연결 대기 중"));
+        await Task.Delay(200);
+        using (var invalidRemembered = new AdminConnection(pairing with { Token = new string('B', 64) }))
+        {
+            bool rejected = false; try { await invalidRemembered.ConnectAsync(); } catch { rejected = true; }
+            if (!rejected) throw new Exception("Automatic approval bypassed credential validation");
+        }
+        agent.Close();
+        if (agent.Visible || agent.IsDisposed) throw new Exception("Close did not keep agent in tray");
+        await Task.Delay(200);
+        using (var background = new AdminConnection(pairing)) { await background.ConnectAsync(); }
+        agent.Show();
+        ClickButton(agent, "대기·제어 종료"); await agent.ExitAsync();
+        using (var startupAgent = new AgentForm(startInTray: true))
+        {
+            startupAgent.Show(); await Task.Delay(200);
+            if (startupAgent.Visible) throw new Exception("Startup did not hide agent in tray");
+            using (var startupConnection = new AdminConnection(pairing)) { await startupConnection.ConnectAsync(); }
+            await startupAgent.ExitAsync();
+        }
         using (var panel = new SessionPanel(pairing)) { panel.CreateControl(); }
         Console.WriteLine("PASS Windows DPAPI, hooks, forms, real Admin/Agent TLS consent, credential rejection, commands, file transfer and disconnect");
     }

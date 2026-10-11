@@ -13,7 +13,7 @@ using Channel = SchoolPc.Core.Channel;
 
 namespace SchoolPc.Agent;
 
-public sealed record AgentSettings(string Name, int Port, string Token);
+public sealed record AgentSettings(string Name, int Port, string Token, bool AutoApprove = false);
 internal sealed class AgentSession(Channel channel, CancellationTokenSource stop, string address)
 {
     public Channel Channel { get; } = channel;
@@ -42,12 +42,16 @@ public sealed class AgentForm : Form
     private AgentSession? session;
     private int busy;
     private bool closing;
+    private bool exiting;
+    private readonly NotifyIcon tray = new() { Icon = SystemIcons.Application, Text = "School PC · 관리 대상", Visible = true };
+    private readonly bool startInTray;
     private Task? acceptTask;
     private readonly HashSet<Task> handlers = [];
     private readonly object handlerGate = new();
 
-    public AgentForm()
+    public AgentForm(bool startInTray = false)
     {
+        this.startInTray = startInTray;
         Text = "School PC · 관리 대상"; Size = new Size(850, 670); Ui.Style(this);
         settings = Storage.Load<AgentSettings>("agent.settings") ?? new(Environment.MachineName, 45832, Convert.ToHexString(RandomNumberGenerator.GetBytes(32)));
         Storage.Save("agent.settings", settings);
@@ -57,11 +61,12 @@ public sealed class AgentForm : Form
         layout.RowStyles.Add(new(SizeType.AutoSize)); layout.RowStyles.Add(new(SizeType.AutoSize)); layout.RowStyles.Add(new(SizeType.AutoSize));
         layout.RowStyles.Add(new(SizeType.AutoSize)); layout.RowStyles.Add(new(SizeType.AutoSize)); layout.RowStyles.Add(new(SizeType.Percent, 100)); layout.RowStyles.Add(new(SizeType.AutoSize));
         layout.Controls.Add(Ui.Label("내 PC 관리 연결", 22), 0, 0);
-        layout.Controls.Add(Ui.Label("① 관리자에게 등록 파일 전달  ② 연결 대기 시작"), 0, 1);
+        layout.Controls.Add(Ui.Label("실행하면 연결 대기가 시작됩니다. 관리자에게 등록 파일을 전달해 주세요."), 0, 1);
         var buttons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         buttons.Controls.AddRange([Ui.Button("연결 대기 시작", (_, _) => StartListening(), true), Ui.Button("대기·제어 종료", (_, _) => StopListening()),
             Ui.Button("관리자 등록 파일 저장", (_, _) => ExportPairing()),
-            Ui.MenuButton("설정", Ui.MenuItem("PC 이름·주소·포트", (_, _) => EditConnection()), Ui.MenuItem("등록 키 변경…", (_, _) => RotateToken()), new ToolStripSeparator(),
+            Ui.MenuButton("설정", Ui.MenuItem("PC 이름·주소·포트", (_, _) => EditConnection()), Ui.MenuItem("등록 키 변경…", (_, _) => RotateToken()), Ui.MenuItem("등록 관리자 자동 허용 설정", (_, _) => ConfigureApproval()),
+                Ui.MenuItem("Windows 로그인 시 자동 실행", (_, _) => ConfigureStartup()), Ui.MenuItem("프로그램 종료", async (_, _) => await ExitAsync()), new ToolStripSeparator(),
                 Ui.MenuItem("관리자에게 파일 보내기", async (_, _) => await SendLocalFile()), Ui.MenuItem("받은 파일 폴더", (_, _) => OpenInbox()),
                 Ui.MenuItem("Windows Wi-Fi 관리", (_, _) => new WifiForm().Show(this)), new ToolStripSeparator(),
                 Ui.MenuItem("업데이트 확인", async (_, _) => await Updater.CheckAsync(this, ShutdownAsync)), Ui.MenuItem("현재 프로그램 제거…", async (_, _) => await Removal.RequestAsync(this, ShutdownAsync)))]);
@@ -69,9 +74,17 @@ public sealed class AgentForm : Form
         var details = new Panel { Dock = DockStyle.Fill };
         var toggle = Ui.Button("활동 내역 보기", (_, _) => { log.Visible = !log.Visible; }); toggle.Dock = DockStyle.Top;
         log.Visible = false; details.Controls.Add(log); details.Controls.Add(toggle); layout.Controls.Add(details, 0, 5);
-        layout.Controls.Add(Ui.Label("긴급 종료: Ctrl+Alt+F12 · 접속할 때 이 PC에서 승인합니다."), 0, 6);
+        layout.Controls.Add(Ui.Label("긴급 해제: Ctrl+Alt+F12 · X를 누르면 트레이에서 계속 실행됩니다."), 0, 6);
         Controls.Add(layout);
-        input.Emergency += () => { if (!IsDisposed) BeginInvoke((Action)(() => Disconnect("긴급 해제"))); };
+        var trayMenu = new ContextMenuStrip();
+        trayMenu.Items.Add("창 열기", null, (_, _) => ShowWindow());
+        trayMenu.Items.Add("긴급 제어 해제", null, (_, _) => StopListening());
+        trayMenu.Items.Add("프로그램 종료", null, async (_, _) => await ExitAsync());
+        tray.ContextMenuStrip = trayMenu;
+        tray.DoubleClick += (_, _) => ShowWindow();
+        Shown += (_, _) => { StartListening(); if (this.startInTray) Hide(); };
+        Resize += (_, _) => { if (WindowState == FormWindowState.Minimized) Hide(); };
+        input.Emergency += () => { if (!IsDisposed) BeginInvoke((Action)(() => StopListening())); };
         watchdog.Tick += (_, _) =>
         {
             lockStatus.Text = input.MouseLocked || input.KeyboardLocked ? $"마우스: {(input.MouseLocked ? "잠금" : "사용 가능")} / 키보드: {(input.KeyboardLocked ? "잠금" : "사용 가능")} · {input.Remaining}초 뒤 자동 해제" : "입력 잠금 없음";
@@ -81,10 +94,30 @@ public sealed class AgentForm : Form
         FormClosing += async (_, e) =>
         {
             if (closing) return;
+            if (e.CloseReason == CloseReason.UserClosing && !exiting) { e.Cancel = true; Hide(); return; }
             e.Cancel = true; closing = true;
-            await ShutdownAsync(); input.Dispose(); certificate.Dispose(); watchdog.Dispose(); Close();
+            await ShutdownAsync(); input.Dispose(); certificate.Dispose(); watchdog.Dispose();
+            tray.Visible = false; tray.ContextMenuStrip?.Dispose(); tray.Dispose(); Close();
         };
-        AddLog("등록 파일을 관리자 PC로 전달한 뒤 연결 대기를 시작해 주세요.");
+        AddLog("등록 파일을 신뢰하는 관리자에게만 전달하세요. X 버튼은 트레이로 숨깁니다.");
+    }
+    private void ShowWindow() { Show(); WindowState = FormWindowState.Normal; Activate(); }
+    internal async Task ExitAsync() { exiting = true; await ShutdownAsync(); Close(); }
+    private void ConfigureApproval()
+    {
+        bool enabled = !settings.AutoApprove;
+        string message = enabled
+            ? "등록 키를 가진 관리자의 연결·화면 공유·원격 입력·잠금·전원 요청을 추가 승인 없이 허용할까요?\n긴급 해제는 계속 사용할 수 있습니다."
+            : "자동 허용을 끄고 연결마다 승인하도록 바꿀까요? 현재 연결도 종료합니다.";
+        if (MessageBox.Show(this, message, "등록 관리자 자동 허용", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        Disconnect("자동 허용 설정 변경"); settings = settings with { AutoApprove = enabled }; Storage.Save("agent.settings", settings);
+        AddLog(enabled ? "등록 관리자 자동 허용 켜짐" : "등록 관리자 자동 허용 꺼짐");
+    }
+    private void ConfigureStartup()
+    {
+        bool enabled = !StartupRegistration.Enabled;
+        if (MessageBox.Show(this, enabled ? "Windows 로그인 시 트레이에서 자동 실행할까요?" : "Windows 로그인 시 자동 실행을 끌까요?", "자동 실행", MessageBoxButtons.YesNo) != DialogResult.Yes) return;
+        try { StartupRegistration.SetEnabled(enabled); AddLog(enabled ? "자동 실행 켜짐" : "자동 실행 꺼짐"); } catch (Exception e) { Ui.Error(this, e); }
     }
     private static X509Certificate2 LoadCertificate()
     {
@@ -180,10 +213,11 @@ public sealed class AgentForm : Form
             { auth.CancelAfter(TimeSpan.FromSeconds(5)); hello = await channel.ReadAsync(auth.Token); }
             if (hello.Type != "hello" || hello.Text.Length != 64 || !Security.EqualHash(Security.HashToken(hello.Text), Security.HashToken(settings.Token)))
             { await Ui.OnUi(this, () => { AddLog("등록 키가 일치하지 않아 연결을 거절했습니다. 등록 파일을 새로 저장해 관리자에 다시 추가해 주세요."); return true; }); return; }
-            bool approved = await ApproveAsync(address, stop.Token);
+            bool approved = settings.AutoApprove || await ApproveAsync(address, stop.Token);
             if (!approved) { await channel.SendAsync(new("denied", Text: "관리 대상에서 연결을 승인하지 않았습니다."), stop.Token); return; }
             active = new(channel, stop, address);
-            await Ui.OnUi(this, () => { session = active; status.Text = $"관리자 연결됨 · {address}"; AddLog("관리자 연결 승인: " + address); return true; });
+            await Ui.OnUi(this, () => { session = active; status.Text = $"관리자 연결됨 · {address}"; tray.Text = "School PC · 관리자 연결됨";
+                tray.ShowBalloonTip(5000, "관리자 연결됨", "화면 공유·원격 제어 연결이 시작되었습니다.", ToolTipIcon.Info); AddLog("관리자 연결 승인: " + address); return true; });
             await channel.SendAsync(new("accepted", Text: settings.Name), stop.Token);
             frames = ScreenLoop(active);
             while (!stop.IsCancellationRequested)
@@ -242,7 +276,7 @@ public sealed class AgentForm : Form
         {
             stop.Cancel(); client.Dispose();
             if (frames != null) { try { await frames; } catch { } }
-            try { await Ui.OnUi(this, () => { if (session == active && active != null) { session = null; input.Unlock(); input.ReleaseRemote(); status.Text = listener == null ? "연결 대기 꺼짐" : "연결 대기 중"; AddLog("관리자 연결 종료 · 입력 잠금 해제"); } return true; }); } catch (ObjectDisposedException) { }
+            try { await Ui.OnUi(this, () => { if (session == active && active != null) { session = null; tray.Text = "School PC · 관리 대상"; input.Unlock(); input.ReleaseRemote(); status.Text = listener == null ? "연결 대기 꺼짐" : "연결 대기 중"; AddLog("관리자 연결 종료 · 입력 잠금 해제"); } return true; }); } catch (ObjectDisposedException) { }
             Interlocked.Exchange(ref busy, 0);
         }
     }
@@ -259,15 +293,19 @@ public sealed class AgentForm : Form
             if (ct.IsCancellationRequested) return false;
             Show(); WindowState = FormWindowState.Normal; Activate();
             AddLog("등록 확인 완료 · 연결 승인 창을 확인해 주세요.");
-            using var dialog = new Form { Text = "관리자 연결 승인", TopMost = true, ShowInTaskbar = true, Size = new Size(570, 390), StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false };
-            Ui.Style(dialog); dialog.MinimumSize = new Size(570, 390);
+            using var dialog = new Form { Text = "관리자 연결 승인", TopMost = true, ShowInTaskbar = true, Size = new Size(640, 490), StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false };
+            Ui.Style(dialog); dialog.MinimumSize = new Size(640, 490);
             var content = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), FlowDirection = FlowDirection.TopDown };
-            content.Controls.Add(Ui.Label($"관리자 주소: {address}\n\n화면 공유, 원격 입력, 파일 받기, 입력 잠금 및\nWindows 잠금 요청을 허용하시겠습니까?\n파일 보내기는 이 PC에서 직접 선택합니다.\n30초 안에 승인하지 않으면 거절합니다."));
+            content.Controls.Add(Ui.Label($"관리자 주소: {address}\n\n화면 공유, 원격 입력, 파일 받기, 입력 잠금 및\nWindows 잠금 요청을 허용하시겠습니까?\n종료·재시작 요청은 60초 유예 후 실행됩니다.\n파일 보내기는 이 PC에서 직접 선택합니다.\n30초 안에 승인하지 않으면 거절합니다."));
+            var remember = new CheckBox { Text = "이 등록 키를 가진 관리자의 다음 연결·전원 요청 자동 허용", AutoSize = true, Checked = true };
+            content.Controls.Add(remember);
             content.Controls.Add(Ui.Button("이 연결 허용", (_, _) => { dialog.DialogResult = DialogResult.Yes; dialog.Close(); }, true));
             content.Controls.Add(Ui.Button("거절", (_, _) => { dialog.DialogResult = DialogResult.No; dialog.Close(); })); dialog.Controls.Add(content);
             using var timer = new System.Windows.Forms.Timer { Interval = 250 }; long end = Environment.TickCount64 + 30000;
             timer.Tick += (_, _) => { if (ct.IsCancellationRequested || Environment.TickCount64 >= end) { dialog.DialogResult = DialogResult.No; dialog.Close(); } }; timer.Start();
-            return dialog.ShowDialog(this) == DialogResult.Yes && !ct.IsCancellationRequested;
+            bool allowed = dialog.ShowDialog(this) == DialogResult.Yes && !ct.IsCancellationRequested;
+            if (allowed && remember.Checked) { settings = settings with { AutoApprove = true }; Storage.Save("agent.settings", settings); }
+            return allowed;
         });
     }
     private static async Task ScreenLoop(AgentSession s)
@@ -336,11 +374,12 @@ public sealed class AgentForm : Form
     private void RequestPower(string action)
     {
         string label = action == "restart" ? "다시 시작" : "종료";
-        if (MessageBox.Show(this, $"관리자가 PC {label}을 요청했습니다. 저장하지 않은 작업을 확인해 주세요.\n허용하면 60초 후 실행됩니다. 허용할까요?", "전원 요청", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+        if (!settings.AutoApprove && MessageBox.Show(this, $"관리자가 PC {label}을 요청했습니다. 저장하지 않은 작업을 확인해 주세요.\n허용하면 60초 후 실행됩니다. 허용할까요?", "전원 요청", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
         input.Unlock(); input.ReleaseRemote();
         var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "shutdown.exe")) { UseShellExecute = false, CreateNoWindow = true };
         start.ArgumentList.Add(action == "restart" ? "/r" : "/s"); start.ArgumentList.Add("/t"); start.ArgumentList.Add("60");
-        System.Diagnostics.Process.Start(start); AddLog("승인된 전원 요청: " + label);
+        System.Diagnostics.Process.Start(start); AddLog("등록 관리자 전원 요청 (60초 후): " + label);
+        tray.ShowBalloonTip(10000, "PC " + label + " 예정", "관리자 요청으로 60초 뒤 실행됩니다. 작업을 저장해 주세요.", ToolTipIcon.Warning);
     }
     private void ExportPairing()
     {
@@ -358,7 +397,7 @@ public sealed class AgentForm : Form
     private void RotateToken()
     {
         if (MessageBox.Show(this, "이전 관리자 등록 키를 무효화하고 연결을 종료할까요?", "등록 키 변경", MessageBoxButtons.YesNo) != DialogResult.Yes) return;
-        StopListening(); settings = settings with { Token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)) }; Storage.Save("agent.settings", settings); AddLog("등록 키 변경 완료 · 등록 파일을 다시 전달해 주세요.");
+        StopListening(); settings = settings with { Token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)), AutoApprove = false }; Storage.Save("agent.settings", settings); AddLog("등록 키 변경 완료 · 등록 파일을 다시 전달해 주세요.");
     }
     private void Disconnect(string reason)
     {
