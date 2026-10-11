@@ -29,6 +29,12 @@ public sealed class NativeInput : IDisposable
     private readonly HashSet<int> remoteButtons = [];
     private bool mouseLocked, keyboardLocked, remoteControlBlocked;
     private long expires;
+    public EmergencyShortcut Shortcut { get; private set; } = EmergencyShortcut.Default;
+    public void SetEmergencyShortcut(EmergencyShortcut shortcut)
+    {
+        if (!shortcut.Valid) throw new ArgumentException("Ctrl·Alt·Shift 중 두 개 이상과 일반 키 또는 기능 키를 선택해 주세요.");
+        Shortcut = shortcut;
+    }
     public event Action? Emergency;
     public bool MouseLocked => remoteControlBlocked || (mouseLocked && Environment.TickCount64 < expires);
     public bool KeyboardLocked => remoteControlBlocked || (keyboardLocked && Environment.TickCount64 < expires);
@@ -71,10 +77,13 @@ public sealed class NativeInput : IDisposable
             if ((key.Flags & 0x10) == 0)
             {
                 int vk = (int)key.Code;
-                if (((long)message) is 0x100 or 0x104) localPressed.Add(vk); else localPressed.Remove(vk);
+                bool down = ((long)message) is 0x100 or 0x104;
+                bool firstDown = down && localPressed.Add(vk);
+                if (!down) localPressed.Remove(vk);
                 bool ctrl = localPressed.Overlaps([0x11, 0xA2, 0xA3]);
                 bool alt = localPressed.Overlaps([0x12, 0xA4, 0xA5]);
-                if (vk == 0x7B && ctrl && alt)
+                bool shift = localPressed.Overlaps([0x10, 0xA0, 0xA1]);
+                if (firstDown && Shortcut.Matches(vk, ctrl, alt, shift))
                 {
                     Unlock(); Emergency?.Invoke();
                     return new IntPtr(1);
