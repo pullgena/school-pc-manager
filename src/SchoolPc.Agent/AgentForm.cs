@@ -55,6 +55,7 @@ public sealed class AgentForm : Form
     private SharedScreenForm? sharedScreen;
     private Cursor? focusCursor;
     private SubmissionForm? submission;
+    private MessagePopup? messagePopup;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource<bool>> submissionReplies = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource<bool>> savedReplies = new();
     private readonly List<Form> curtains = [];
@@ -118,7 +119,7 @@ public sealed class AgentForm : Form
             if (closing) return;
             if (e.CloseReason == CloseReason.UserClosing && !exiting) { e.Cancel = true; Hide(); return; }
             e.Cancel = true; closing = true;
-            await ShutdownAsync(); input.Dispose(); certificate.Dispose(); watchdog.Dispose();
+            await ShutdownAsync(); messagePopup?.Dispose(); input.Dispose(); certificate.Dispose(); watchdog.Dispose();
             tray.Visible = false; tray.ContextMenuStrip?.Dispose(); tray.Dispose(); Close();
         };
         AddLog("등록 파일을 신뢰하는 관리자에게만 전달하세요. X 버튼은 트레이로 숨깁니다.");
@@ -358,7 +359,13 @@ public sealed class AgentForm : Form
                             await SessionUi(active, () => { ClearCurtains(); active.PrivacyEnabled = false; StopDisplay(); input.Unlock(); input.ReleaseRemote(); NativeInput.LockWindows(); AddLog("Windows 잠금 요청"); return true; }); break;
                         case "message":
                             if (packet.Text.Length > 1000) throw new InvalidDataException("메시지가 너무 깁니다.");
-                            await SessionUi(active, () => { AddLog("관리자 메시지: " + packet.Text, audit: false); Show(); WindowState = FormWindowState.Normal; Activate(); return true; }); break;
+                            await SessionUi(active, () =>
+                            {
+                                AddLog("관리자 메시지: " + packet.Text, audit: false);
+                                if (messagePopup is { IsDisposed: false }) messagePopup.AppendMessage(packet.Text);
+                                else { messagePopup = new MessagePopup(packet.Text); messagePopup.Show(); }
+                                return true;
+                            }); break;
                         case "file-begin": receiver.Begin(packet); break;
                         case "file-chunk": receiver.Chunk(packet); break;
                         case "file-end":
