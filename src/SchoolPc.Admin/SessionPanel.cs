@@ -12,10 +12,13 @@ public sealed class SessionPanel : UserControl
     private TableLayoutPanel layout = null!;
     private readonly object frameGate = new();
     private Bitmap? latestFrame;
+    private int latestFrameSequence;
     private bool framePosted;
     private readonly System.Windows.Forms.Timer shareTimer = new() { Interval = 100 };
     private bool sharing, sharingBusy, shareAwaitingAck;
     private int shareGeneration;
+    private int shareSequence;
+    private long shareFrameSent;
     private string? shareDevice;
     private bool exitApprovalOpen;
     private bool privacyLocked;
@@ -67,13 +70,20 @@ public sealed class SessionPanel : UserControl
         blockLocal.CheckedChanged += async (_, _) => { if (connected) await Run(new("control", Enabled: control.Checked, X: blockLocal.Checked ? 1 : 0)); };
         shareTimer.Tick += async (_, _) =>
         {
-            if (!sharing || sharingBusy || shareAwaitingAck || !Connection.Connected) return;
+            if (!sharing || sharingBusy || !Connection.Connected) return;
+            // A missing acknowledgement must not leave screen sharing frozen indefinitely.
+            if (shareAwaitingAck && Environment.TickCount64 - shareFrameSent < 2000) return;
             sharingBusy = true; int generation = shareGeneration;
             try
             {
                 string? device = shareDevice;
                 byte[] bytes = await Task.Run(() => DesktopCapture.Jpeg(1280, 55, device: device));
-                if (sharing && generation == shareGeneration) { shareAwaitingAck = true; await Connection.SendAsync(new("broadcast-frame", Data: bytes)); }
+                if (sharing && generation == shareGeneration)
+                {
+                    shareSequence = shareSequence == int.MaxValue ? 1 : shareSequence + 1;
+                    shareAwaitingAck = true; shareFrameSent = Environment.TickCount64;
+                    await Connection.SendAsync(new("broadcast-frame", Value: shareSequence, Data: bytes));
+                }
             }
             catch (Exception e) { sharing = false; shareTimer.Stop(); await Run(new("broadcast-stop")); status.Text = "내 화면 공유 중단: " + e.Message; }
             finally { sharingBusy = false; }
@@ -121,7 +131,7 @@ public sealed class SessionPanel : UserControl
     private void Receive(Packet p)
     {
         if (p.Type == "exit-request") { Post(() => _ = ApproveTargetExit(p)); return; }
-        if (p.Type == "broadcast-ack") { Post(() => shareAwaitingAck = false); return; }
+        if (p.Type == "broadcast-ack") { Post(() => { if (p.Value == 0 || p.Value == shareSequence) shareAwaitingAck = false; }); return; }
         if (p.Type == "frame" && p.Data != null)
         {
             try
@@ -129,26 +139,38 @@ public sealed class SessionPanel : UserControl
                 using var stream = new MemoryStream(p.Data); using var loaded = Image.FromStream(stream);
                 if (loaded.Width > 4096 || loaded.Height > 4096) throw new InvalidDataException("화면 크기가 너무 큽니다.");
                 var bitmap = new Bitmap(loaded);
-                QueueFrame(bitmap);
+                QueueFrame(bitmap, p.Value);
             }
-            catch (Exception e) { Post(() => status.Text = "화면 읽기 오류: " + e.Message); }
+            catch (Exception e)
+            {
+                Post(() => status.Text = "화면 읽기 오류: " + e.Message);
+                // Discard a malformed frame and allow the sender to produce the next one.
+                _ = AcknowledgeFrame(p.Value);
+            }
         }
         else if (p.Type is "notice" or "error") Post(() => status.Text = p.Text);
     }
-    private void QueueFrame(Bitmap bitmap)
+    private async Task AcknowledgeFrame(int sequence)
+    {
+        if (!Connection.FrameAcknowledgement || !Connection.Connected) return;
+        try { await Connection.SendAsync(new("frame-ack", Value: sequence)); }
+        catch (Exception e) { Post(() => status.Text = e.Message); }
+    }
+    private void QueueFrame(Bitmap bitmap, int sequence)
     {
         lock (frameGate)
         {
             if (disposed) { bitmap.Dispose(); return; }
-            latestFrame?.Dispose(); latestFrame = bitmap;
+            latestFrame?.Dispose(); latestFrame = bitmap; latestFrameSequence = sequence;
             if (framePosted) return;
             framePosted = true;
             if (!Post(() =>
             {
-                Bitmap? next;
-                lock (frameGate) { next = latestFrame; latestFrame = null; framePosted = false; }
-                if (next != null) view.SetFrame(next);
-                if (Connection.FrameAcknowledgement) _ = Run(new("frame-ack"));
+                Bitmap? next; int renderedSequence;
+                lock (frameGate) { next = latestFrame; latestFrame = null; renderedSequence = latestFrameSequence; framePosted = false; }
+                try { if (next != null) view.SetFrame(next); }
+                catch (Exception e) { next?.Dispose(); status.Text = "화면 표시 오류: " + e.Message; }
+                finally { _ = AcknowledgeFrame(renderedSequence); }
             })) { latestFrame.Dispose(); latestFrame = null; framePosted = false; }
         }
     }

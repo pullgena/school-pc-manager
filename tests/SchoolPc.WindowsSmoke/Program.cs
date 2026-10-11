@@ -28,6 +28,18 @@ internal sealed class TestRunner : Form
     internal int Result = 1;
     [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
+    [StructLayout(LayoutKind.Sequential)] private struct HookKey { public uint Code, Scan, Flags, Time; public UIntPtr Extra; }
+    private static void HookKeyEvent(NativeInput input, Keys key, bool down, bool injected = false)
+    {
+        var pointer = Marshal.AllocHGlobal(Marshal.SizeOf<HookKey>());
+        try
+        {
+            Marshal.StructureToPtr(new HookKey { Code = (uint)key, Flags = injected ? 0x10u : 0 }, pointer, false);
+            typeof(NativeInput).GetMethod("KeyboardProc", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .Invoke(input, [0, (IntPtr)(down ? 0x100 : 0x101), pointer]);
+        }
+        finally { Marshal.FreeHGlobal(pointer); }
+    }
     protected override async void OnShown(EventArgs e)
     {
         base.OnShown(e);
@@ -79,6 +91,53 @@ internal sealed class TestRunner : Form
         finally { release.TrySetResult(); }
         await sending;
     }
+    private async Task TestFrameRecovery(Pairing pairing, X509Certificate2 certificate)
+    {
+        using var server = new TcpListener(IPAddress.Loopback, 0); server.Start();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        int acknowledgements = 0, shares = 0;
+        var serving = Task.Run(async () =>
+        {
+            using var tcp = await server.AcceptTcpClientAsync(timeout.Token);
+            using var tls = new SslStream(tcp.GetStream());
+            await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = certificate, EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13 }, timeout.Token);
+            using var wire = new SchoolPc.Core.Channel(tls);
+            await wire.ReadAsync(timeout.Token); await wire.SendAsync(new("accepted", Value: 2), timeout.Token);
+            await wire.SendAsync(new("frame", Value: 101, Data: [1, 2, 3]), timeout.Token);
+            while (!timeout.IsCancellationRequested)
+            {
+                var packet = await wire.ReadAsync(timeout.Token);
+                if (packet.Type == "ping") await wire.SendAsync(new("pong"), timeout.Token);
+                if (packet.Type == "frame-ack")
+                {
+                    if (packet.Value == 101)
+                    {
+                        Interlocked.Increment(ref acknowledgements);
+                        await wire.SendAsync(new("frame", Value: 102, Data: DesktopCapture.Jpeg(blank: true)), timeout.Token);
+                    }
+                    else if (packet.Value == 102) Interlocked.Increment(ref acknowledgements);
+                }
+                // Drop the first broadcast acknowledgement; another frame must arrive after the timeout.
+                if (packet.Type == "broadcast-frame")
+                {
+                    if (Interlocked.Increment(ref shares) >= 2) return;
+                }
+            }
+        });
+        using var panel = new SessionPanel(pairing with { Port = ((IPEndPoint)server.LocalEndpoint).Port });
+        Controls.Add(panel); panel.Show();
+        try { await panel.ConnectAsync(); }
+        catch { if (serving.IsFaulted) await serving; throw; }
+        await WaitUntil(() => Volatile.Read(ref acknowledgements) == 2);
+        var image = typeof(ScreenView).GetField("image", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(Descendants(panel).OfType<ScreenView>().Single());
+        if (image == null) throw new Exception("Valid frame did not recover after corrupt frame");
+        typeof(SessionPanel).GetField("sharing", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(panel, true);
+        var timer = (System.Windows.Forms.Timer)typeof(SessionPanel).GetField("shareTimer", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(panel)!;
+        timer.Start(); await serving;
+        if (Volatile.Read(ref shares) < 2) throw new Exception("Missing screen-share acknowledgement froze sharing");
+        Controls.Remove(panel);
+    }
     private async Task Run()
     {
         if (System.Runtime.InteropServices.Marshal.SizeOf<WifiManager.InterfaceInfo>() != 532 || System.Runtime.InteropServices.Marshal.SizeOf<WifiManager.ProfileInfo>() != 516) throw new Exception("WLAN ABI mismatch");
@@ -88,6 +147,18 @@ internal sealed class TestRunner : Form
         if (!UserSecret.Unprotect(UserSecret.Protect(secret)).SequenceEqual(secret)) throw new Exception("DPAPI round trip failed");
         using (var input = new NativeInput())
         {
+            int emergencies = 0; input.Emergency += () => emergencies++;
+            input.SetEmergencyShortcut(new((int)Keys.F10)); input.SetLocks(true, true, 0);
+            HookKeyEvent(input, Keys.ControlKey, true); HookKeyEvent(input, Keys.Menu, true);
+            HookKeyEvent(input, Keys.F12, true); HookKeyEvent(input, Keys.F12, false);
+            HookKeyEvent(input, Keys.F10, true, injected: true);
+            if (emergencies != 0 || !input.KeyboardLocked) throw new Exception("Old or remote-injected shortcut released control");
+            HookKeyEvent(input, Keys.F10, true); HookKeyEvent(input, Keys.F10, true); HookKeyEvent(input, Keys.F10, false);
+            if (emergencies != 1 || input.KeyboardLocked || input.MouseLocked) throw new Exception("Custom shortcut failed during input lock or repeated on key-up");
+            HookKeyEvent(input, Keys.ControlKey, false); HookKeyEvent(input, Keys.Menu, false);
+            bool invalidShortcut = false;
+            try { input.SetEmergencyShortcut(new((int)Keys.F10, Control: false, Alt: false)); } catch (ArgumentException) { invalidShortcut = true; }
+            if (!invalidShortcut) throw new Exception("Shortcut could be disabled");
             if (input.MouseHookInstalled) throw new Exception("Unblocked local mouse has a global hook");
             input.SetLocks(true, false, 0);
             if (!input.MouseHookInstalled || !input.MouseLocked) throw new Exception("Mouse lock hook was not installed");
@@ -132,6 +203,22 @@ internal sealed class TestRunner : Form
         var reserve = new TcpListener(IPAddress.Loopback, 0); reserve.Start(); int port = ((IPEndPoint)reserve.LocalEndpoint).Port; reserve.Stop();
         var settings = new AgentSettings("CI 교실 PC", port, Convert.ToHexString(RandomNumberGenerator.GetBytes(32))); Storage.Save("agent.settings", settings);
         using var agent = new AgentForm(); agent.Show(); await Task.Delay(100);
+        var tabs = Descendants(agent).OfType<TabControl>().Single();
+        var settingsPage = tabs.TabPages.Cast<TabPage>().Single(p => p.Text == "설정"); tabs.SelectedTab = settingsPage;
+        var notify = (NotifyIcon)typeof(AgentForm).GetField("tray", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(agent)!;
+        if (notify.ContextMenuStrip!.Items.Cast<ToolStripItem>().Any(i => i.Text?.Contains("긴급") == true)) throw new Exception("Tray still contains emergency release");
+        if (!Descendants(settingsPage).OfType<Button>().Any(b => b.Text == "긴급 제어 해제")) throw new Exception("Settings emergency release missing");
+        var shortcutKey = Descendants(settingsPage).OfType<ComboBox>().Single(); shortcutKey.SelectedItem = Keys.F10;
+        var modifiers = Descendants(settingsPage).OfType<CheckBox>().ToDictionary(c => c.Text);
+        modifiers["Ctrl"].Checked = false; modifiers["Alt"].Checked = false;
+        ClickButton(settingsPage, "단축키 저장");
+        if (Storage.Load<AgentSettings>("agent.settings")!.Shortcut != EmergencyShortcut.Default) throw new Exception("Settings saved an invalid shortcut");
+        modifiers["Ctrl"].Checked = true; modifiers["Shift"].Checked = true;
+        ClickButton(settingsPage, "단축키 저장");
+        var savedShortcut = new EmergencyShortcut((int)Keys.F10, Alt: false, Shift: true);
+        if (Storage.Load<AgentSettings>("agent.settings")!.Shortcut != savedShortcut || !Descendants(settingsPage).OfType<Label>().Any(l => l.Text == "현재 긴급 해제 단축키: Ctrl+Shift+F10")) throw new Exception("Custom shortcut was not saved or displayed");
+        using (var bitmap = new Bitmap(agent.Width, agent.Height)) { agent.DrawToBitmap(bitmap, agent.ClientRectangle); bitmap.Save("out/previews/agent-settings.png"); }
+        tabs.SelectedIndex = 0;
         using (var bitmap = new Bitmap(agent.Width, agent.Height)) { agent.DrawToBitmap(bitmap, agent.ClientRectangle); bitmap.Save("out/previews/agent.png"); }
         ClickButton(agent, "연결 대기 시작");
         using var cert = X509CertificateLoader.LoadPkcs12(UserSecret.Unprotect(File.ReadAllBytes(Storage.PathFor("agent.certificate"))), "", X509KeyStorageFlags.EphemeralKeySet);
@@ -153,6 +240,17 @@ internal sealed class TestRunner : Form
         using var connection = new AdminConnection(pairing);
         await connection.ConnectAsync(); approval.Stop();
         if (!connection.Connected) throw new Exception("Admin/Agent TLS connection failed");
+        int backgroundFrames = 0;
+        Action<Packet> frameProbe = p =>
+        {
+            if (p.Type == "frame") { Interlocked.Increment(ref backgroundFrames); _ = connection.SendAsync(new("frame-ack", Value: p.Value)); }
+        };
+        connection.Received += frameProbe;
+        await connection.SendAsync(new("screen", Enabled: true)); await WaitUntil(() => Volatile.Read(ref backgroundFrames) >= 2);
+        int beforeStall = Volatile.Read(ref backgroundFrames);
+        Thread.Sleep(800); // Deliberately stall the UI: TLS reading and capture must keep progressing.
+        if (Volatile.Read(ref backgroundFrames) <= beforeStall) throw new Exception("UI stall froze capture or network reception");
+        await connection.SendAsync(new("screen", Enabled: false)); await Task.Delay(200); connection.Received -= frameProbe;
         await connection.SendAsync(new("message", Text: "CI 왕복 메시지"));
         await WaitUntil(() => Descendants(agent).OfType<TextBox>().Any(t => t.Text.Contains("CI 왕복 메시지")));
         // Character delivery is checked against an explicitly focused, disposable test textbox.
@@ -205,6 +303,7 @@ internal sealed class TestRunner : Form
         if (!File.ReadAllBytes(received).SequenceEqual(data)) throw new Exception("Agent file bytes changed");
         File.Delete(received);
         await TestChosenReceiveFolder(pairing, cert, file, data);
+        await TestFrameRecovery(pairing, cert);
         // Fullscreen reparenting must retain the live viewport after returning.
         using (var panel = new SessionPanel(pairing))
         {
@@ -291,10 +390,11 @@ internal sealed class TestRunner : Form
         await Task.Delay(200);
         using (var background = new AdminConnection(pairing)) { await background.ConnectAsync(); }
         agent.Show();
-        ClickButton(agent, "대기·제어 종료"); await agent.ExitAsync();
+        tabs.SelectedTab = settingsPage; ClickButton(agent, "긴급 제어 해제"); await agent.ExitAsync();
         using (var startupAgent = new AgentForm(startInTray: true))
         {
             startupAgent.Show(); await Task.Delay(200);
+            if (!Descendants(startupAgent).OfType<Label>().Any(l => l.Text == "현재 긴급 해제 단축키: Ctrl+Shift+F10")) throw new Exception("Shortcut was not restored after restart");
             if (startupAgent.Visible) throw new Exception("Startup did not hide agent in tray");
             using (var startupConnection = new AdminConnection(pairing)) { await startupConnection.ConnectAsync(); }
             await startupAgent.ExitAsync();

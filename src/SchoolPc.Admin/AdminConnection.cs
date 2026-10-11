@@ -42,14 +42,14 @@ public sealed class AdminConnection : IDisposable
             var tls = new SslStream(client.GetStream(), false, (_, cert, _, _) => cert != null && Security.EqualHash(Security.Hash(cert.GetRawCertData()), Pairing.Fingerprint));
             channel = new Channel(tls);
             await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "SchoolPcAgent", EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13 }, deadline.Token);
-            await channel.SendAsync(new("hello", Text: Pairing.Token, Value: 1), deadline.Token);
+            await channel.SendAsync(new("hello", Text: Pairing.Token, Value: 2), deadline.Token);
             Progress?.Invoke("연결 요청 전송 완료 · 대상의 인증·승인 응답 대기 중");
             using var approval = CancellationTokenSource.CreateLinkedTokenSource(stop.Token); approval.CancelAfter(TimeSpan.FromSeconds(40));
             var response = await channel.ReadAsync(approval.Token);
             if (response.Type != "accepted") throw new InvalidOperationException(response.Text.Length == 0 ? "관리 대상에서 접속을 거절했습니다." : response.Text);
             stop.Token.ThrowIfCancellationRequested();
             FrameAcknowledgement = response.Value >= 1; established = true; Interlocked.Exchange(ref lastPong, Environment.TickCount64);
-            receiveTask = ReadLoop(); heartbeatTask = Heartbeat(); Storage.Audit("admin", "연결: " + Pairing.Name);
+            receiveTask = Task.Run(ReadLoop); heartbeatTask = Task.Run(Heartbeat); Storage.Audit("admin", "연결: " + Pairing.Name);
         }
         catch (OperationCanceledException) when (!stop.IsCancellationRequested)
         { Dispose(); throw new IOException("연결 시간이 초과되었습니다. 대상의 연결 대기 상태, 등록 주소·키, Windows 방화벽 허용 및 활동 내역을 확인해 주세요."); }
