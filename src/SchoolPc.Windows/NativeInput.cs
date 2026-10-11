@@ -30,7 +30,7 @@ public sealed class NativeInput : IDisposable
     public event Action? Emergency;
     public bool MouseLocked => mouseLocked && Environment.TickCount64 < expires;
     public bool KeyboardLocked => keyboardLocked && Environment.TickCount64 < expires;
-    public long Remaining => Math.Max(0, (expires - Environment.TickCount64 + 999) / 1000);
+    public long Remaining => expires == long.MaxValue ? -1 : Math.Max(0, (expires - Environment.TickCount64 + 999) / 1000);
     public NativeInput()
     {
         keyboardCallback = KeyboardProc; mouseCallback = MouseProc;
@@ -42,7 +42,7 @@ public sealed class NativeInput : IDisposable
         if ((mouse && mouseHook == IntPtr.Zero) || (keyboard && keyboardHook == IntPtr.Zero))
             throw new Win32Exception("입력 잠금 훅을 설치하지 못했습니다.");
         mouseLocked = mouse; keyboardLocked = keyboard;
-        expires = Environment.TickCount64 + Math.Clamp(seconds, 1, 120) * 1000L;
+        expires = seconds == 0 ? long.MaxValue : Environment.TickCount64 + Math.Clamp(seconds, 1, 120) * 1000L;
     }
     public void Unlock() { mouseLocked = keyboardLocked = false; expires = 0; }
     private IntPtr KeyboardProc(int code, IntPtr message, IntPtr data)

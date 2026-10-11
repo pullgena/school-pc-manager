@@ -5,6 +5,7 @@ namespace SchoolPc.Admin;
 public sealed class ScreenView : Control
 {
     private Image? image;
+    private readonly RemoteWindowsKeys windowsKeys;
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool RemoteInput { get; set; }
     public event Action<int, int>? MoveRemote;
@@ -14,6 +15,7 @@ public sealed class ScreenView : Control
     public event Action? ReleaseRemote;
     public ScreenView()
     {
+        windowsKeys = new(() => RemoteInput && Focused && FindForm()?.ContainsFocus == true, (key, down) => KeyRemote?.Invoke(key, down));
         Dock = DockStyle.Fill; BackColor = Color.FromArgb(20, 26, 39); TabStop = true;
         SetStyle(ControlStyles.Selectable | ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
     }
@@ -53,5 +55,5 @@ public sealed class ScreenView : Control
     protected override void OnKeyDown(KeyEventArgs e) { if (RemoteInput) { KeyRemote?.Invoke((int)e.KeyCode, true); e.Handled = true; e.SuppressKeyPress = true; } base.OnKeyDown(e); }
     protected override void OnKeyUp(KeyEventArgs e) { if (RemoteInput) { KeyRemote?.Invoke((int)e.KeyCode, false); e.Handled = true; } base.OnKeyUp(e); }
     protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); ReleaseRemote?.Invoke(); Invalidate(); }
-    protected override void Dispose(bool disposing) { if (disposing) image?.Dispose(); base.Dispose(disposing); }
+    protected override void Dispose(bool disposing) { if (disposing) { windowsKeys.Dispose(); image?.Dispose(); } base.Dispose(disposing); }
 }

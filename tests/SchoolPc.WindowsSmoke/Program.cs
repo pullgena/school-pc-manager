@@ -37,7 +37,7 @@ internal sealed class TestRunner : Form
     {
         foreach (Control child in parent.Controls) { yield return child; foreach (var inner in Descendants(child)) yield return inner; }
     }
-    private static void ClickButton(Form form, string text) => Descendants(form).OfType<Button>().First(b => b.Text == text).PerformClick();
+    private static void ClickButton(Control form, string text) => Descendants(form).OfType<Button>().First(b => b.Text == text).PerformClick();
     private static async Task WaitUntil(Func<bool> predicate, int milliseconds = 10000)
     {
         long deadline = Environment.TickCount64 + milliseconds;
@@ -94,6 +94,31 @@ internal sealed class TestRunner : Form
         string received = Directory.GetFiles(inbox, "smoke-source-*.bin").Single();
         if (!File.ReadAllBytes(received).SequenceEqual(data)) throw new Exception("Agent file bytes changed");
         File.Delete(received);
+        // Fullscreen reparenting must retain the live viewport after returning.
+        using (var panel = new SessionPanel(pairing))
+        {
+            Controls.Add(panel); panel.Show();
+            var viewport = Descendants(panel).OfType<ScreenView>().Single();
+            ClickButton(panel, "전체 화면"); await Task.Delay(100);
+            var fullscreen = Application.OpenForms.Cast<Form>().Single(f => f.Text == "원격 화면 · F11로 돌아가기");
+            if (!Descendants(fullscreen).Contains(viewport)) throw new Exception("Fullscreen did not move viewport");
+            fullscreen.Close();
+            if (!Descendants(panel).Contains(viewport) || viewport.IsDisposed) throw new Exception("Fullscreen disposed viewport");
+            Controls.Remove(panel);
+        }
+        byte[] frame = DesktopCapture.Jpeg(blank: true);
+        bool sharedAck = false;
+        connection.Received += p => { if (p.Type == "broadcast-ack") sharedAck = true; };
+        await connection.SendAsync(new("broadcast-start", Enabled: false));
+        await connection.SendAsync(new("broadcast-frame", Data: frame));
+        await WaitUntil(() => sharedAck);
+        var shared = Application.OpenForms.Cast<Form>().Single(f => f.Text.StartsWith("관리자 화면 공유"));
+        if (!Descendants(shared).OfType<PictureBox>().Any(p => p.Image != null)) throw new Exception("Shared frame was not displayed");
+        await connection.SendAsync(new("broadcast-stop")); await WaitUntil(() => shared.IsDisposed);
+        await connection.SendAsync(new("screen-lock", Enabled: true));
+        await WaitUntil(() => Application.OpenForms.Cast<Form>().Any(f => Descendants(f).OfType<Label>().Any(l => l.Text.StartsWith("관리자 화면 잠금"))));
+        await connection.SendAsync(new("unlock"));
+        await WaitUntil(() => !Application.OpenForms.Cast<Form>().Any(f => Descendants(f).OfType<Label>().Any(l => l.Text.StartsWith("관리자 화면 잠금"))));
         connection.Dispose(); await WaitUntil(() => Descendants(agent).OfType<Label>().Any(l => l.Text == "연결 대기 중"));
         // The first approval remembered this registration; subsequent connections must not show a dialog.
         await Task.Delay(200);

@@ -69,6 +69,23 @@ await Test("file transfer round trip and source stream consistency", async () =>
     }
     finally { Directory.Delete(root, true); }
 });
+await Test("selected receive folders and in-progress folder changes", () =>
+{
+    string root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+    try
+    {
+        using var receiver = new FileReceiver(Path.Combine(root, "default"));
+        string selected = Path.Combine(root, "selected"); receiver.SetFolder(selected);
+        string id = Guid.NewGuid().ToString("N"); byte[] bytes = [1, 2, 3];
+        receiver.Begin(new("file-begin", Id: id, Text: "note.bin", Size: bytes.Length, Hash: Security.Hash(bytes)));
+        Reject(() => receiver.SetFolder(Path.Combine(root, "other")));
+        receiver.Chunk(new("file-chunk", Id: id, Size: 0, Data: bytes));
+        string saved = receiver.End(new("file-end", Id: id));
+        Assert(Path.GetDirectoryName(saved) == selected && File.ReadAllBytes(saved).SequenceEqual(bytes), "selected folder ignored");
+    }
+    finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    return Task.CompletedTask;
+});
 await Test("file receiver rejects oversized, out-of-order and corrupt transfers", () =>
 {
     string folder = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")); string id = Guid.NewGuid().ToString("N");
