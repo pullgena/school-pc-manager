@@ -10,7 +10,12 @@ namespace SchoolPc.Admin;
 public sealed class AdminConnection : IDisposable
 {
     public Pairing Pairing { get; }
-    public AdminConnection(Pairing pairing) { Pairing = pairing; }
+    public AdminConnection(Pairing pairing)
+    {
+        Pairing = pairing;
+        var preferences = Storage.Load<Dictionary<string, string>>("admin.receive-folders");
+        if (preferences != null && preferences.TryGetValue(pairing.Fingerprint, out string? folder)) ReceiveFolder = folder;
+    }
     private TcpClient? client;
     private Channel? channel;
     private readonly CancellationTokenSource stop = new();
@@ -18,6 +23,9 @@ public sealed class AdminConnection : IDisposable
     private Task? receiveTask, heartbeatTask;
     private long lastPong;
     private volatile bool established;
+    public bool FrameAcknowledgement { get; private set; }
+    public string? ReceiveFolder { get; set; }
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource<string>> folderRequests = new();
     public event Action<string>? Progress;
     public event Action<Packet>? Received;
     public event Action<string>? Closed;
@@ -34,12 +42,12 @@ public sealed class AdminConnection : IDisposable
             var tls = new SslStream(client.GetStream(), false, (_, cert, _, _) => cert != null && Security.EqualHash(Security.Hash(cert.GetRawCertData()), Pairing.Fingerprint));
             channel = new Channel(tls);
             await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "SchoolPcAgent", EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13 }, deadline.Token);
-            await channel.SendAsync(new("hello", Text: Pairing.Token), deadline.Token);
+            await channel.SendAsync(new("hello", Text: Pairing.Token, Value: 1), deadline.Token);
             Progress?.Invoke("연결 요청 전송 완료 · 대상의 인증·승인 응답 대기 중");
             using var approval = CancellationTokenSource.CreateLinkedTokenSource(stop.Token); approval.CancelAfter(TimeSpan.FromSeconds(40));
             var response = await channel.ReadAsync(approval.Token);
             if (response.Type != "accepted") throw new InvalidOperationException(response.Text.Length == 0 ? "관리 대상에서 접속을 거절했습니다." : response.Text);
-            established = true; Interlocked.Exchange(ref lastPong, Environment.TickCount64);
+            FrameAcknowledgement = response.Value >= 1; established = true; Interlocked.Exchange(ref lastPong, Environment.TickCount64);
             receiveTask = ReadLoop(); heartbeatTask = Heartbeat(); Storage.Audit("admin", "연결: " + Pairing.Name);
         }
         catch (OperationCanceledException) when (!stop.IsCancellationRequested)
@@ -63,6 +71,18 @@ public sealed class AdminConnection : IDisposable
         catch { Dispose(); throw; }
         finally { upload.Release(); }
     }
+    public async Task<string> SelectTargetFolderAsync(string proposed)
+    {
+        string id = Guid.NewGuid().ToString("N");
+        var pending = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        folderRequests[id] = pending;
+        try
+        {
+            await SendAsync(new("select-folder", Id: id, Text: proposed));
+            return await pending.Task.WaitAsync(TimeSpan.FromSeconds(90), stop.Token);
+        }
+        finally { folderRequests.TryRemove(id, out _); }
+    }
     private async Task ReadLoop()
     {
         string inbox = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "SchoolPc 받은 파일", "PC-" + SafeFolder(Pairing.Name));
@@ -75,7 +95,14 @@ public sealed class AdminConnection : IDisposable
                 switch (packet.Type)
                 {
                     case "pong": Interlocked.Exchange(ref lastPong, Environment.TickCount64); break;
-                    case "file-begin": receiver.Begin(packet); break;
+                    case "folder-selected":
+                        if (folderRequests.TryGetValue(packet.Id, out var pending))
+                        {
+                            if (packet.Enabled) pending.TrySetResult(packet.Text);
+                            else pending.TrySetException(new IOException("대상에서 저장 폴더 선택을 취소했습니다."));
+                        }
+                        break;
+                    case "file-begin": receiver.SetFolder(ReceiveFolder ?? inbox); receiver.Begin(packet); break;
                     case "file-chunk": receiver.Chunk(packet); break;
                     case "file-end":
                         string saved = receiver.End(packet); Storage.Audit("admin", "파일 받기 완료");
@@ -103,6 +130,7 @@ public sealed class AdminConnection : IDisposable
     public void Dispose()
     {
         if (stop.IsCancellationRequested) return;
+        foreach (var request in folderRequests.Values) request.TrySetCanceled();
         established = false; stop.Cancel(); channel?.Dispose(); client?.Dispose();
         // CTS and semaphores remain valid until asynchronous readers/uploads have observed cancellation.
     }

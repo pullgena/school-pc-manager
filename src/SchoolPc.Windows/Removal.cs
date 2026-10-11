@@ -9,7 +9,7 @@ public static class Removal
 {
     internal static string RoleFiles(string assembly) => assembly switch
     {
-        "SchoolPc.Admin" => "admin.profiles,admin-audit.log",
+        "SchoolPc.Admin" => "admin.profiles,admin.receive-folders,admin-audit.log",
         "SchoolPc.Agent" => "agent.settings,agent.certificate,agent-audit.log",
         _ => throw new InvalidDataException("제거할 프로그램을 확인하지 못했습니다.")
     };

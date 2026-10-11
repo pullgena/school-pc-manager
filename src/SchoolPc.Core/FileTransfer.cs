@@ -5,6 +5,12 @@ namespace SchoolPc.Core;
 /// <summary>One bounded transfer per connection; never writes an arbitrary remote path.</summary>
 public sealed class FileReceiver(string folder) : IDisposable
 {
+    private string receiveFolder = folder;
+    public void SetFolder(string folder)
+    {
+        if (output != null) throw new InvalidDataException("전송 중에는 저장 위치를 변경할 수 없습니다.");
+        receiveFolder = Path.GetFullPath(folder);
+    }
     public const long MaxFile = 256L * 1024 * 1024;
     public const int ChunkSize = 64 * 1024;
     private FileStream? output;
@@ -17,10 +23,10 @@ public sealed class FileReceiver(string folder) : IDisposable
         string name = Security.SafeName(p.Text);
         if (p.Size < 0 || p.Size > MaxFile || !Security.ValidHash(p.Hash) || !Guid.TryParseExact(p.Id, "N", out _))
             throw new InvalidDataException("파일 크기 또는 해시가 잘못되었습니다.");
-        Directory.CreateDirectory(folder);
+        Directory.CreateDirectory(receiveFolder);
         id = p.Id; expected = p.Size; received = 0; expectedHash = p.Hash;
-        target = Path.Combine(folder, $"{Path.GetFileNameWithoutExtension(name)}-{id[..8]}{Path.GetExtension(name)}");
-        temporary = Path.Combine(folder, $".{id}.part");
+        target = Path.Combine(receiveFolder, $"{Path.GetFileNameWithoutExtension(name)}-{id[..8]}{Path.GetExtension(name)}");
+        temporary = Path.Combine(receiveFolder, $".{id}.part");
         output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None);
         hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         return id;

@@ -2,7 +2,7 @@
   #define Role "Agent"
 #endif
 #ifndef AppVersion
-  #define AppVersion "0.1.5"
+  #define AppVersion "0.1.6"
 #endif
 #if Role == "Agent"
   #define RoleLabel "관리 대상"
@@ -73,6 +73,8 @@ Type: files; Name: "{localappdata}\SchoolPcManager\agent.certificate"
 #else
 Type: files; Name: "{localappdata}\SchoolPcManager\admin.profiles"
 Type: files; Name: "{localappdata}\SchoolPcManager\admin.profiles.new"
+Type: files; Name: "{localappdata}\SchoolPcManager\admin.receive-folders"
+Type: files; Name: "{localappdata}\SchoolPcManager\admin.receive-folders.new"
 #endif
 
 [Code]

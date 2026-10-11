@@ -25,12 +25,12 @@ public sealed class NativeInput : IDisposable
     private readonly HashSet<int> localPressed = [];
     private readonly HashSet<int> remotePressed = [];
     private readonly HashSet<int> remoteButtons = [];
-    private bool mouseLocked, keyboardLocked;
+    private bool mouseLocked, keyboardLocked, remoteControlBlocked;
     private long expires;
     public event Action? Emergency;
-    public bool MouseLocked => mouseLocked && Environment.TickCount64 < expires;
-    public bool KeyboardLocked => keyboardLocked && Environment.TickCount64 < expires;
-    public long Remaining => Math.Max(0, (expires - Environment.TickCount64 + 999) / 1000);
+    public bool MouseLocked => remoteControlBlocked || (mouseLocked && Environment.TickCount64 < expires);
+    public bool KeyboardLocked => remoteControlBlocked || (keyboardLocked && Environment.TickCount64 < expires);
+    public long Remaining => remoteControlBlocked || expires == long.MaxValue ? -1 : Math.Max(0, (expires - Environment.TickCount64 + 999) / 1000);
     public NativeInput()
     {
         keyboardCallback = KeyboardProc; mouseCallback = MouseProc;
@@ -42,9 +42,16 @@ public sealed class NativeInput : IDisposable
         if ((mouse && mouseHook == IntPtr.Zero) || (keyboard && keyboardHook == IntPtr.Zero))
             throw new Win32Exception("입력 잠금 훅을 설치하지 못했습니다.");
         mouseLocked = mouse; keyboardLocked = keyboard;
-        expires = Environment.TickCount64 + Math.Clamp(seconds, 1, 120) * 1000L;
+        expires = seconds == 0 ? long.MaxValue : Environment.TickCount64 + Math.Clamp(seconds, 1, 120) * 1000L;
     }
-    public void Unlock() { mouseLocked = keyboardLocked = false; expires = 0; }
+    public void SetRemoteControlBlock(bool enabled)
+    {
+        if (enabled && (mouseHook == IntPtr.Zero || keyboardHook == IntPtr.Zero))
+            throw new Win32Exception("입력 잠금 훅을 설치하지 못했습니다.");
+        remoteControlBlocked = enabled;
+    }
+    public void UnlockManual() { mouseLocked = keyboardLocked = false; expires = 0; }
+    public void Unlock() { remoteControlBlocked = false; UnlockManual(); }
     private IntPtr KeyboardProc(int code, IntPtr message, IntPtr data)
     {
         if (code >= 0)
@@ -94,6 +101,18 @@ public sealed class NativeInput : IDisposable
         bool extended = vk is 0x21 or 0x22 or 0x23 or 0x24 or 0x25 or 0x26 or 0x27 or 0x28 or 0x2D or 0x2E or 0x5B or 0x5C or 0xA3 or 0xA5;
         Send(new() { Type = 1, Union = new() { Keyboard = new() { Code = (ushort)vk, Flags = (down ? 0u : 2u) | (extended ? 1u : 0u) } } });
         if (down) remotePressed.Add(vk); else remotePressed.Remove(vk);
+    }
+    public void Text(string text)
+    {
+        if (text.Length is < 1 or > 256 || text.Any(char.IsControl)) throw new InvalidDataException("잘못된 입력 문자입니다.");
+        var entries = new Input[text.Length * 2];
+        for (int i = 0; i < text.Length; i++)
+        {
+            entries[i * 2] = new() { Type = 1, Union = new() { Keyboard = new() { Scan = text[i], Flags = 4 } } };
+            entries[i * 2 + 1] = new() { Type = 1, Union = new() { Keyboard = new() { Scan = text[i], Flags = 6 } } };
+        }
+        if (SendInput((uint)entries.Length, entries, Marshal.SizeOf<Input>()) != entries.Length)
+            throw new Win32Exception("현재 화면에 문자를 입력할 수 없습니다.");
     }
     public void ReleaseRemote()
     {

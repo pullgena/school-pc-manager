@@ -19,7 +19,10 @@ internal sealed class AgentSession(Channel channel, CancellationTokenSource stop
     public Channel Channel { get; } = channel;
     public CancellationTokenSource Stop { get; } = stop;
     public string Address { get; } = address;
-    public volatile bool ScreenEnabled, ControlEnabled;
+    public volatile bool ScreenEnabled, ControlEnabled, PrivacyEnabled;
+    public bool FrameAcknowledgement;
+    public int FramePending;
+    public long FrameSent;
     public long LastHeartbeat = Environment.TickCount64;
     public readonly SemaphoreSlim SendFile = new(1);
 }
@@ -29,6 +32,8 @@ public sealed class AgentForm : Form
     private AgentSettings settings;
     private readonly X509Certificate2 certificate;
     private readonly NativeInput input = new();
+    internal bool LocalMouseLocked => input.MouseLocked;
+    internal bool LocalKeyboardLocked => input.KeyboardLocked;
     private readonly TextBox name = new() { Width = 190 };
     private readonly NumericUpDown port = new() { Minimum = 1024, Maximum = 65535, Width = 95 };
     private readonly TextBox host = new() { Width = 165 };
@@ -45,6 +50,10 @@ public sealed class AgentForm : Form
     private bool exiting;
     private readonly NotifyIcon tray = new() { Icon = SystemIcons.Application, Text = "School PC · 관리 대상", Visible = true };
     private readonly bool startInTray;
+    private SharedScreenForm? sharedScreen;
+    private readonly List<Form> curtains = [];
+    private bool stoppingDisplay;
+    private int choosingFolder;
     private Task? acceptTask;
     private readonly HashSet<Task> handlers = [];
     private readonly object handlerGate = new();
@@ -87,7 +96,7 @@ public sealed class AgentForm : Form
         input.Emergency += () => { if (!IsDisposed) BeginInvoke((Action)(() => StopListening())); };
         watchdog.Tick += (_, _) =>
         {
-            lockStatus.Text = input.MouseLocked || input.KeyboardLocked ? $"마우스: {(input.MouseLocked ? "잠금" : "사용 가능")} / 키보드: {(input.KeyboardLocked ? "잠금" : "사용 가능")} · {input.Remaining}초 뒤 자동 해제" : "입력 잠금 없음";
+            lockStatus.Text = input.MouseLocked || input.KeyboardLocked ? $"마우스: {(input.MouseLocked ? "잠금" : "사용 가능")} / 키보드: {(input.KeyboardLocked ? "잠금" : "사용 가능")} · {(input.Remaining < 0 ? "연결 중 ON" : input.Remaining + "초 뒤 해제")}" : "입력 잠금 없음";
             if (session is { } s && Environment.TickCount64 - Interlocked.Read(ref s.LastHeartbeat) > 15000) Disconnect("연결 응답 시간 초과");
         };
         watchdog.Start();
@@ -215,10 +224,10 @@ public sealed class AgentForm : Form
             { await Ui.OnUi(this, () => { AddLog("등록 키가 일치하지 않아 연결을 거절했습니다. 등록 파일을 새로 저장해 관리자에 다시 추가해 주세요."); return true; }); return; }
             bool approved = settings.AutoApprove || await ApproveAsync(address, stop.Token);
             if (!approved) { await channel.SendAsync(new("denied", Text: "관리 대상에서 연결을 승인하지 않았습니다."), stop.Token); return; }
-            active = new(channel, stop, address);
+            active = new(channel, stop, address) { FrameAcknowledgement = hello.Value >= 1 };
             await Ui.OnUi(this, () => { session = active; status.Text = $"관리자 연결됨 · {address}"; tray.Text = "School PC · 관리자 연결됨";
                 tray.ShowBalloonTip(5000, "관리자 연결됨", "화면 공유·원격 제어 연결이 시작되었습니다.", ToolTipIcon.Info); AddLog("관리자 연결 승인: " + address); return true; });
-            await channel.SendAsync(new("accepted", Text: settings.Name), stop.Token);
+            await channel.SendAsync(new("accepted", Text: settings.Name, Value: 1), stop.Token);
             frames = ScreenLoop(active);
             while (!stop.IsCancellationRequested)
             {
@@ -228,19 +237,38 @@ public sealed class AgentForm : Form
                 {
                     switch (packet.Type)
                     {
+                        case "frame-ack": Interlocked.Exchange(ref active.FramePending, 0); break;
+                        case "select-folder":
+                            _ = ChooseReceiveFolder(active, receiver, packet); break;
+                        case "screen-lock":
+                            await Ui.OnUi(this, () => { SetPrivacy(active, packet.Enabled); return true; }); break;
+                        case "broadcast-start":
+                            await Ui.OnUi(this, () => { StartDisplay(packet.Enabled); return true; }); break;
+                        case "broadcast-frame":
+                            if (packet.Data == null || packet.Data.Length > 2 * 1024 * 1024) throw new InvalidDataException("공유 화면 크기가 잘못되었습니다.");
+                            using (var stream = new MemoryStream(packet.Data))
+                            using (var decoded = Image.FromStream(stream))
+                            {
+                                if (decoded.Width > 1920 || decoded.Height > 1920) throw new InvalidDataException("공유 화면 해상도가 너무 큽니다.");
+                                var bitmap = new Bitmap(decoded);
+                                await Ui.OnUi(this, () => { if (sharedScreen is { IsDisposed: false }) sharedScreen.SetFrame(bitmap); else bitmap.Dispose(); return true; });
+                            }
+                            await channel.SendAsync(new("broadcast-ack"), stop.Token); break;
+                        case "broadcast-stop":
+                            await Ui.OnUi(this, () => { StopDisplay(); return true; }); break;
                         case "screen": active.ScreenEnabled = packet.Enabled; Storage.Audit("agent", packet.Enabled ? "화면 공유 시작" : "화면 공유 종료"); break;
                         case "control":
-                            await Ui.OnUi(this, () => { active.ControlEnabled = packet.Enabled; if (!packet.Enabled) { input.ReleaseRemote(); input.Unlock(); } AddLog(packet.Enabled ? "원격 입력 켜짐" : "원격 입력 꺼짐"); return true; }); break;
-                        case "move": case "button": case "wheel": case "key":
+                            await Ui.OnUi(this, () => { input.SetRemoteControlBlock(packet.Enabled && packet.X == 1); active.ControlEnabled = packet.Enabled; if (!packet.Enabled) { input.ReleaseRemote(); } AddLog(packet.Enabled ? "원격 입력 켜짐" : "원격 입력 꺼짐"); return true; }); break;
+                        case "move": case "button": case "wheel": case "key": case "text":
                             if (!active.ControlEnabled) throw new InvalidOperationException("원격 입력이 꺼져 있습니다.");
                             await Ui.OnUi(this, () => { ExecuteInput(packet); return true; }); break;
                         case "release": await Ui.OnUi(this, () => { input.ReleaseRemote(); return true; }); break;
                         case "locks":
-                            await Ui.OnUi(this, () => { input.SetLocks(packet.X == 1, packet.Y == 1, packet.Value); AddLog($"입력 잠금 변경 · 최대 {Math.Clamp(packet.Value, 1, 120)}초"); return true; });
-                            await channel.SendAsync(new("notice", Text: "입력 잠금을 변경했습니다. 제한 시간 뒤 자동 해제됩니다."), stop.Token); break;
-                        case "unlock": await Ui.OnUi(this, () => { input.Unlock(); input.ReleaseRemote(); AddLog("입력 잠금 해제"); return true; }); break;
+                            await Ui.OnUi(this, () => { ClearCurtains(); active.PrivacyEnabled = false; input.SetLocks(packet.X == 1, packet.Y == 1, packet.Value); AddLog("입력 잠금 ON/OFF 변경"); return true; });
+                            await channel.SendAsync(new("notice", Text: "입력 잠금을 변경했습니다. 연결 종료·긴급 해제 시 풀립니다."), stop.Token); break;
+                        case "unlock": await Ui.OnUi(this, () => { ClearCurtains(); active.PrivacyEnabled = false; StopDisplay(); input.Unlock(); input.ReleaseRemote(); AddLog("입력 잠금 해제"); return true; }); break;
                         case "windows-lock":
-                            await Ui.OnUi(this, () => { input.Unlock(); input.ReleaseRemote(); NativeInput.LockWindows(); AddLog("Windows 잠금 요청"); return true; }); break;
+                            await Ui.OnUi(this, () => { ClearCurtains(); active.PrivacyEnabled = false; StopDisplay(); input.Unlock(); input.ReleaseRemote(); NativeInput.LockWindows(); AddLog("Windows 잠금 요청"); return true; }); break;
                         case "message":
                             if (packet.Text.Length > 1000) throw new InvalidDataException("메시지가 너무 깁니다.");
                             await Ui.OnUi(this, () => { AddLog("관리자 메시지: " + packet.Text, audit: false); Show(); WindowState = FormWindowState.Normal; Activate(); return true; }); break;
@@ -250,9 +278,9 @@ public sealed class AgentForm : Form
                             string saved = receiver.End(packet);
                             await Ui.OnUi(this, () => { AddLog("파일 받기 완료: " + Path.GetFileName(saved), audit: false); return true; });
                             Storage.Audit("agent", "파일 받기 완료");
-                            await channel.SendAsync(new("notice", Text: "관리 대상 PC의 받은 파일 폴더에 저장되었습니다."), stop.Token); break;
+                            await channel.SendAsync(new("notice", Text: "관리 대상 PC의 받은 파일 폴더 또는 선택한 폴더에 저장되었습니다: " + saved), stop.Token); break;
                         case "network-settings":
-                            await Ui.OnUi(this, () => { input.Unlock(); new WifiForm().Show(this); AddLog("관리자 Wi-Fi 관리 창 열기 요청"); return true; }); break;
+                            await Ui.OnUi(this, () => { ClearCurtains(); active.PrivacyEnabled = false; StopDisplay(); input.Unlock(); new WifiForm().Show(this); AddLog("관리자 Wi-Fi 관리 창 열기 요청"); return true; }); break;
                         case "request-file":
                             _ = SendLocalFile(); break;
                         case "power":
@@ -276,7 +304,7 @@ public sealed class AgentForm : Form
         {
             stop.Cancel(); client.Dispose();
             if (frames != null) { try { await frames; } catch { } }
-            try { await Ui.OnUi(this, () => { if (session == active && active != null) { session = null; tray.Text = "School PC · 관리 대상"; input.Unlock(); input.ReleaseRemote(); status.Text = listener == null ? "연결 대기 꺼짐" : "연결 대기 중"; AddLog("관리자 연결 종료 · 입력 잠금 해제"); } return true; }); } catch (ObjectDisposedException) { }
+            try { await Ui.OnUi(this, () => { if (session == active && active != null) { ClearCurtains(); StopDisplay(); session = null; tray.Text = "School PC · 관리 대상"; input.Unlock(); input.ReleaseRemote(); status.Text = listener == null ? "연결 대기 꺼짐" : "연결 대기 중"; AddLog("관리자 연결 종료 · 입력 잠금 해제"); } return true; }); } catch (ObjectDisposedException) { }
             Interlocked.Exchange(ref busy, 0);
         }
     }
@@ -296,7 +324,7 @@ public sealed class AgentForm : Form
             using var dialog = new Form { Text = "관리자 연결 승인", TopMost = true, ShowInTaskbar = true, Size = new Size(640, 490), StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false };
             Ui.Style(dialog); dialog.MinimumSize = new Size(640, 490);
             var content = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), FlowDirection = FlowDirection.TopDown };
-            content.Controls.Add(Ui.Label($"관리자 주소: {address}\n\n화면 공유, 원격 입력, 파일 받기, 입력 잠금 및\nWindows 잠금 요청을 허용하시겠습니까?\n종료·재시작 요청은 60초 유예 후 실행됩니다.\n파일 보내기는 이 PC에서 직접 선택합니다.\n30초 안에 승인하지 않으면 거절합니다."));
+            content.Controls.Add(Ui.Label($"관리자 주소: {address}\n\n화면 공유·관리자 화면 표시·원격 입력·파일 받기·입력 잠금 및\nWindows 잠금 요청을 허용하시겠습니까?\n종료·재시작 요청은 즉시 실행됩니다.\n파일 보내기는 이 PC에서 직접 선택합니다.\n30초 안에 승인하지 않으면 거절합니다."));
             var remember = new CheckBox { Text = "이 등록 키를 가진 관리자의 다음 연결·전원 요청 자동 허용", AutoSize = true, Checked = true };
             content.Controls.Add(remember);
             content.Controls.Add(Ui.Button("이 연결 허용", (_, _) => { dialog.DialogResult = DialogResult.Yes; dialog.Close(); }, true));
@@ -315,28 +343,20 @@ public sealed class AgentForm : Form
         {
             while (!s.Stop.IsCancellationRequested)
             {
-                if (s.ScreenEnabled)
+                if (s.ScreenEnabled && (!s.FrameAcknowledgement || Volatile.Read(ref s.FramePending) == 0 || Environment.TickCount64 - Interlocked.Read(ref s.FrameSent) > 2000))
                 {
                     try
                     {
-                        // Primary monitor, desktop pixels; secure desktops intentionally remain inaccessible.
-                        var bounds = Screen.PrimaryScreen!.Bounds;
-                        using var original = new Bitmap(bounds.Width, bounds.Height);
-                        using (var graphics = Graphics.FromImage(original)) graphics.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size);
-                        double ratio = Math.Min(1, 1600d / bounds.Width);
-                        using var scaled = new Bitmap(original, new Size(Math.Max(1, (int)(bounds.Width * ratio)), Math.Max(1, (int)(bounds.Height * ratio))));
-                        using var bytes = new MemoryStream();
-                        var encoder = ImageCodecInfo.GetImageEncoders().First(e => e.MimeType == "image/jpeg");
-                        using var parameters = new EncoderParameters(1); parameters.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 65L);
-                        scaled.Save(bytes, encoder, parameters);
-                        await s.Channel.SendAsync(new("frame", X: bounds.Width, Y: bounds.Height, Data: bytes.ToArray()), s.Stop.Token); failures = 0;
+                        byte[] bytes = DesktopCapture.Jpeg(1280, 55, s.PrivacyEnabled);
+                        Interlocked.Exchange(ref s.FramePending, 1); Interlocked.Exchange(ref s.FrameSent, Environment.TickCount64);
+                        await s.Channel.SendAsync(new("frame", Data: bytes), s.Stop.Token); failures = 0;
                     }
                     catch (Exception e) when (e is System.ComponentModel.Win32Exception or System.Runtime.InteropServices.ExternalException or ArgumentException)
                     {
                         if (++failures == 1) await s.Channel.SendAsync(new("notice", Text: "화면을 캡처할 수 없습니다. 로그인 상태 또는 보안 화면을 확인해 주세요."), s.Stop.Token);
                     }
                 }
-                await Task.Delay(300, s.Stop.Token);
+                await Task.Delay(80, s.Stop.Token);
             }
         }
         catch (Exception) { s.Stop.Cancel(); s.Channel.Dispose(); }
@@ -349,6 +369,7 @@ public sealed class AgentForm : Form
             case "button": input.Button(p.Value, p.Enabled); break;
             case "wheel": input.Wheel(p.Value); break;
             case "key": input.Key(p.Value, p.Enabled); break;
+            case "text": input.Text(p.Text); break;
         }
     }
     private async Task SendLocalFile()
@@ -371,15 +392,73 @@ public sealed class AgentForm : Form
         catch (Exception e) { await Ui.OnUi(this, () => { Ui.Error(this, e); return true; }); }
         finally { s.SendFile.Release(); }
     }
+    private async Task ChooseReceiveFolder(AgentSession active, FileReceiver receiver, Packet request)
+    {
+        if (Interlocked.CompareExchange(ref choosingFolder, 1, 0) != 0) return;
+        try
+        {
+            string? folder = await Ui.OnUi(this, () =>
+            {
+                ShowWindow();
+                using var picker = new FolderBrowserDialog { Description = "관리자가 파일을 보낼 저장 위치를 확인·선택하세요", UseDescriptionForTitle = true };
+                if (request.Text.Length <= 1000 && Path.IsPathFullyQualified(request.Text) && Directory.Exists(request.Text)) picker.SelectedPath = request.Text;
+                return picker.ShowDialog(this) == DialogResult.OK ? picker.SelectedPath : null;
+            });
+            if (active.Stop.IsCancellationRequested) return;
+            if (folder != null) receiver.SetFolder(folder);
+            await active.Channel.SendAsync(new("folder-selected", Id: request.Id, Text: folder ?? "", Enabled: folder != null), active.Stop.Token);
+        }
+        catch (Exception e) { Storage.Audit("agent", "저장 폴더 선택 실패: " + e.GetType().Name); }
+        finally { Interlocked.Exchange(ref choosingFolder, 0); }
+    }
+    private void ClearCurtains()
+    {
+        foreach (var form in curtains) form.Dispose(); curtains.Clear();
+    }
+    private void SetPrivacy(AgentSession active, bool enabled)
+    {
+        ClearCurtains(); active.PrivacyEnabled = enabled;
+        if (!enabled) { input.UnlockManual(); return; }
+        StopDisplay(); input.SetLocks(true, true, 0);
+        foreach (var screen in Screen.AllScreens)
+        {
+            var cover = new Form { FormBorderStyle = FormBorderStyle.None, Bounds = screen.Bounds, StartPosition = FormStartPosition.Manual, TopMost = true, ShowInTaskbar = false, BackColor = Color.Black };
+            cover.Controls.Add(new Label { Dock = DockStyle.Fill, ForeColor = Color.White, TextAlign = ContentAlignment.MiddleCenter, Text = "관리자 화면 잠금\n긴급 해제: Ctrl+Alt+F12" });
+            curtains.Add(cover); cover.Show();
+        }
+        AddLog("화면·마우스·키보드 잠금 ON");
+    }
+    private void StartDisplay(bool exclusive)
+    {
+        StopDisplay(); ClearCurtains(); if (session is { } s) s.PrivacyEnabled = false;
+        sharedScreen = new SharedScreenForm(exclusive);
+        sharedScreen.FormClosed += (_, _) => { if (!stoppingDisplay) { ClearCurtains(); input.UnlockManual(); sharedScreen = null; } };
+        if (exclusive)
+        {
+            input.SetLocks(true, true, 0);
+            foreach (var screen in Screen.AllScreens.Where(s => !s.Primary))
+            {
+                var cover = new Form { FormBorderStyle = FormBorderStyle.None, Bounds = screen.Bounds, StartPosition = FormStartPosition.Manual, TopMost = true, ShowInTaskbar = false, BackColor = Color.Black };
+                curtains.Add(cover); cover.Show();
+            }
+        }
+        sharedScreen.Show(); AddLog(exclusive ? "관리자 화면 공유 · 집중 모드" : "관리자 화면 공유 · 일반 모드");
+    }
+    private void StopDisplay()
+    {
+        stoppingDisplay = true;
+        try { sharedScreen?.Dispose(); sharedScreen = null; ClearCurtains(); input.UnlockManual(); }
+        finally { stoppingDisplay = false; }
+    }
     private void RequestPower(string action)
     {
         string label = action == "restart" ? "다시 시작" : "종료";
-        if (!settings.AutoApprove && MessageBox.Show(this, $"관리자가 PC {label}을 요청했습니다. 저장하지 않은 작업을 확인해 주세요.\n허용하면 60초 후 실행됩니다. 허용할까요?", "전원 요청", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+        if (!settings.AutoApprove && MessageBox.Show(this, $"관리자가 PC {label}을 요청했습니다. 저장하지 않은 작업을 확인해 주세요.\n허용하면 즉시 실행됩니다. 허용할까요?", "전원 요청", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
         input.Unlock(); input.ReleaseRemote();
         var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "shutdown.exe")) { UseShellExecute = false, CreateNoWindow = true };
-        start.ArgumentList.Add(action == "restart" ? "/r" : "/s"); start.ArgumentList.Add("/t"); start.ArgumentList.Add("60");
-        System.Diagnostics.Process.Start(start); AddLog("등록 관리자 전원 요청 (60초 후): " + label);
-        tray.ShowBalloonTip(10000, "PC " + label + " 예정", "관리자 요청으로 60초 뒤 실행됩니다. 작업을 저장해 주세요.", ToolTipIcon.Warning);
+        start.ArgumentList.Add(action == "restart" ? "/r" : "/s"); start.ArgumentList.Add("/t"); start.ArgumentList.Add("0");
+        System.Diagnostics.Process.Start(start); AddLog("등록 관리자 전원 요청 (즉시): " + label);
+        tray.ShowBalloonTip(10000, "PC " + label + " 예정", "관리자 요청으로 즉시 실행합니다.", ToolTipIcon.Warning);
     }
     private void ExportPairing()
     {
@@ -401,6 +480,7 @@ public sealed class AgentForm : Form
     }
     private void Disconnect(string reason)
     {
+        ClearCurtains(); StopDisplay();
         input.Unlock(); input.ReleaseRemote();
         if (session is { } s) { s.ControlEnabled = s.ScreenEnabled = false; s.Stop.Cancel(); s.Channel.Dispose(); }
         AddLog(reason);
