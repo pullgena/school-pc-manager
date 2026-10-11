@@ -26,7 +26,7 @@ public sealed class SessionPanel : UserControl
     private readonly SemaphoreSlim events = new(1);
     private int pendingEvents;
     private int pendingX = -1, pendingY;
-    private readonly System.Windows.Forms.Timer mouseTimer = new() { Interval = 40 };
+    private readonly System.Windows.Forms.Timer mouseTimer = new() { Interval = 16 };
     private bool mouseSending;
     private bool connected;
     private bool connecting;
@@ -56,6 +56,7 @@ public sealed class SessionPanel : UserControl
         screen.CheckedChanged += async (_, _) => { if (connected) await Run(new("screen", Enabled: screen.Checked)); };
         control.CheckedChanged += async (_, _) =>
         {
+            pendingX = -1;
             view.RemoteInput = connected && control.Checked; view.Invalidate();
             if (connected) await Run(new("control", Enabled: control.Checked, X: blockLocal.Checked ? 1 : 0));
             status.Text = control.Checked ? "화면의 입력 칸을 클릭한 뒤 입력하세요. 한글 IME는 더 보기에서 문자 직접 입력을 꺼 주세요." : "화면 보기 전용";
@@ -74,29 +75,33 @@ public sealed class SessionPanel : UserControl
             finally { sharingBusy = false; }
         };
         Connection.Progress += message => Post(() => status.Text = message);
-        Connection.Received += Receive; Connection.Closed += reason => Post(() => { sharing = false; shareGeneration++; shareTimer.Stop(); fullScreen?.Close(); privacyLocked = false; mouseLock.Checked = keyboardLock.Checked = false; connected = false; view.RemoteInput = false; screen.Checked = control.Checked = false; status.Text = reason; });
+        Connection.Received += Receive; Connection.Closed += reason => Post(() => { sharing = false; shareGeneration++; shareTimer.Stop(); fullScreen?.Close(); privacyLocked = false; mouseLock.Checked = keyboardLock.Checked = false; pendingX = -1; connected = false; view.RemoteInput = false; screen.Checked = control.Checked = false; status.Text = reason; });
         view.MoveRemote += (x, y) => { pendingX = x; pendingY = y; };
         mouseTimer.Tick += async (_, _) =>
         {
-            if (mouseSending || pendingX < 0 || !view.RemoteInput) return;
+            if (mouseSending || pendingX < 0 || !view.RemoteInput || !view.Focused) return;
             int x = pendingX, y = pendingY; pendingX = -1; mouseSending = true;
             try { await Input(new("move", X: x, Y: y)); } finally { mouseSending = false; }
         }; mouseTimer.Start();
         view.ButtonRemote += async (button, down) =>
         {
-            if (pendingX >= 0) { int x = pendingX, y = pendingY; pendingX = -1; await Input(new("move", X: x, Y: y)); }
-            await Input(new("button", Value: button, Enabled: down));
+            if (pendingX >= 0)
+            {
+                int x = pendingX, y = pendingY; pendingX = -1;
+                await InputBatch(new("move", X: x, Y: y), new("button", Value: button, Enabled: down));
+            }
+            else await Input(new("button", Value: button, Enabled: down));
         };
         view.WheelRemote += async delta => await Input(new("wheel", Value: delta));
         view.KeyRemote += async (key, down) => await Input(new("key", Value: key, Enabled: down));
         view.TextRemote += async text => await Input(new("text", Text: text));
-        view.ReleaseRemote += async () => { if (Connection.Connected) await Input(new("release")); };
+        view.ReleaseRemote += async () => { pendingX = -1; if (Connection.Connected) await Input(new("release")); };
     }
     public void Disconnect()
     {
         // Notify the workspace before cancellation so list clicks cannot start another session.
         DisconnectRequested?.Invoke();
-        connected = false; view.RemoteInput = false;
+        pendingX = -1; connected = false; view.RemoteInput = false;
         sharing = false; shareGeneration++; shareTimer.Stop();
         Connection.Dispose();
         status.Text = "연결을 끊었습니다. 다시 연결하려면 ‘선택한 PC 연결’을 누르세요.";
@@ -189,13 +194,22 @@ public sealed class SessionPanel : UserControl
         try { await Connection.SendAsync(packet); }
         catch (Exception e) { status.Text = e.Message; }
     }
-    private async Task Input(Packet p)
+    private Task Input(Packet packet) => InputBatch([packet]);
+    private async Task InputBatch(params Packet[] packets)
     {
         if (!Connection.Connected || disposed) return;
         // Bound pending input; a stalled connection must not accumulate keystrokes indefinitely.
         if (Interlocked.Increment(ref pendingEvents) > 100) { Interlocked.Decrement(ref pendingEvents); Connection.Dispose(); return; }
         await events.WaitAsync();
-        try { if (Connection.Connected) await Connection.SendAsync(p); }
+        try
+        {
+            foreach (var p in packets)
+            {
+                if (!Connection.Connected) break;
+                if (p.Type == "move" && (!view.RemoteInput || !view.Focused)) continue;
+                await Connection.SendAsync(p);
+            }
+        }
         catch (Exception e) { status.Text = e.Message; }
         finally { events.Release(); Interlocked.Decrement(ref pendingEvents); }
     }

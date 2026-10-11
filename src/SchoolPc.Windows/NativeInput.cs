@@ -21,7 +21,9 @@ public sealed class NativeInput : IDisposable
     [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, Input[] input, int size);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool LockWorkStation();
     private readonly Hook keyboardCallback, mouseCallback;
-    private readonly IntPtr keyboardHook, mouseHook;
+    private readonly IntPtr keyboardHook;
+    private IntPtr mouseHook;
+    internal bool MouseHookInstalled => mouseHook != IntPtr.Zero;
     private readonly HashSet<int> localPressed = [];
     private readonly HashSet<int> remotePressed = [];
     private readonly HashSet<int> remoteButtons = [];
@@ -35,22 +37,31 @@ public sealed class NativeInput : IDisposable
     {
         keyboardCallback = KeyboardProc; mouseCallback = MouseProc;
         keyboardHook = SetWindowsHookEx(13, keyboardCallback, GetModuleHandle(null), 0);
-        mouseHook = SetWindowsHookEx(14, mouseCallback, GetModuleHandle(null), 0);
     }
     public void SetLocks(bool mouse, bool keyboard, int seconds = 60)
     {
-        if ((mouse && mouseHook == IntPtr.Zero) || (keyboard && keyboardHook == IntPtr.Zero))
-            throw new Win32Exception("입력 잠금 훅을 설치하지 못했습니다.");
+        if (keyboard && keyboardHook == IntPtr.Zero) throw new Win32Exception("입력 잠금 훅을 설치하지 못했습니다.");
+        UpdateMouseHook(mouse || remoteControlBlocked);
         mouseLocked = mouse; keyboardLocked = keyboard;
         expires = seconds == 0 ? long.MaxValue : Environment.TickCount64 + Math.Clamp(seconds, 1, 120) * 1000L;
     }
     public void SetRemoteControlBlock(bool enabled)
     {
-        if (enabled && (mouseHook == IntPtr.Zero || keyboardHook == IntPtr.Zero))
-            throw new Win32Exception("입력 잠금 훅을 설치하지 못했습니다.");
+        if (enabled && keyboardHook == IntPtr.Zero) throw new Win32Exception("입력 잠금 훅을 설치하지 못했습니다.");
+        UpdateMouseHook(enabled || (mouseLocked && Environment.TickCount64 < expires));
         remoteControlBlocked = enabled;
     }
-    public void UnlockManual() { mouseLocked = keyboardLocked = false; expires = 0; }
+    private void UpdateMouseHook(bool required)
+    {
+        if (required && mouseHook == IntPtr.Zero)
+        {
+            mouseHook = SetWindowsHookEx(14, mouseCallback, GetModuleHandle(null), 0);
+            if (mouseHook == IntPtr.Zero) throw new Win32Exception("마우스 잠금 훅을 설치하지 못했습니다.");
+        }
+        else if (!required && mouseHook != IntPtr.Zero) { UnhookWindowsHookEx(mouseHook); mouseHook = IntPtr.Zero; }
+    }
+    public void RefreshExpiredLocks() { if (!MouseLocked) UpdateMouseHook(false); }
+    public void UnlockManual() { mouseLocked = keyboardLocked = false; expires = 0; UpdateMouseHook(remoteControlBlocked); }
     public void Unlock() { remoteControlBlocked = false; UnlockManual(); }
     private IntPtr KeyboardProc(int code, IntPtr message, IntPtr data)
     {
