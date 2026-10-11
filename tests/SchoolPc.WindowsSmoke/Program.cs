@@ -252,8 +252,23 @@ internal sealed class TestRunner : Form
         Thread.Sleep(800); // Deliberately stall the UI: TLS reading and capture must keep progressing.
         if (Volatile.Read(ref backgroundFrames) <= beforeStall) throw new Exception("UI stall froze capture or network reception");
         await connection.SendAsync(new("screen", Enabled: false)); await Task.Delay(200); connection.Received -= frameProbe;
+        agent.Hide();
         await connection.SendAsync(new("message", Text: "CI 왕복 메시지"));
-        await WaitUntil(() => Descendants(agent).OfType<TextBox>().Any(t => t.Text.Contains("CI 왕복 메시지")));
+        await WaitUntil(() => Application.OpenForms.OfType<MessagePopup>().Any());
+        var popup = Application.OpenForms.OfType<MessagePopup>().Single();
+        if (agent.Visible || !popup.TopMost || !Descendants(popup).OfType<TextBox>().Any(t => t.Text.Contains("CI 왕복 메시지")))
+            throw new Exception("Message did not appear in a separate popup while the agent stayed hidden");
+        await connection.SendAsync(new("message", Text: "두 번째 메시지\n" + new string('a', 900)));
+        await WaitUntil(() => Descendants(popup).OfType<TextBox>().Any(t => t.Text.Contains(new string('a', 900))));
+        if (Application.OpenForms.OfType<MessagePopup>().Count() != 1 || agent.Visible) throw new Exception("Repeated messages opened duplicate windows or revealed the agent");
+        backgroundFrames = 0; connection.Received += frameProbe;
+        await connection.SendAsync(new("screen", Enabled: true));
+        await WaitUntil(() => Volatile.Read(ref backgroundFrames) >= 2);
+        await connection.SendAsync(new("screen", Enabled: false)); connection.Received -= frameProbe;
+        using (var bitmap = new Bitmap(popup.Width, popup.Height)) { popup.DrawToBitmap(bitmap, popup.ClientRectangle); bitmap.Save("out/previews/message-popup.png"); }
+        ClickButton(popup, "확인");
+        if (!popup.IsDisposed || agent.Visible || !connection.Connected) throw new Exception("Closing message popup changed the agent window or connection");
+        agent.Show();
         // Character delivery is checked against an explicitly focused, disposable test textbox.
         using (var target = new Form { Text = "CI input target" })
         using (var text = new TextBox { Dock = DockStyle.Fill, Multiline = true })
