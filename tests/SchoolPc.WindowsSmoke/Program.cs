@@ -1,6 +1,9 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Net.Security;
+using System.Security.Authentication;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using SchoolPc.Admin;
@@ -23,6 +26,8 @@ internal static class Program
 internal sealed class TestRunner : Form
 {
     internal int Result = 1;
+    [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
     protected override async void OnShown(EventArgs e)
     {
         base.OnShown(e);
@@ -42,6 +47,37 @@ internal sealed class TestRunner : Form
     {
         long deadline = Environment.TickCount64 + milliseconds;
         while (!predicate()) { if (Environment.TickCount64 >= deadline) throw new TimeoutException("Windows integration test timed out"); await Task.Delay(50); }
+    }
+    private static async Task TestChosenReceiveFolder(Pairing pairing, X509Certificate2 cert, string file, byte[] data)
+    {
+        string folder = Storage.PathFor("chosen-inbox");
+        Storage.Save("admin.receive-folders", new Dictionary<string, string> { [pairing.Fingerprint] = folder });
+        using var server = new TcpListener(IPAddress.Loopback, 0); server.Start();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sending = Task.Run(async () =>
+        {
+            using var tcp = await server.AcceptTcpClientAsync();
+            using var tls = new SslStream(tcp.GetStream());
+            await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = cert, EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13 });
+            using var wire = new SchoolPc.Core.Channel(tls);
+            var hello = await wire.ReadAsync(CancellationToken.None);
+            if (hello.Type != "hello" || hello.Text != pairing.Token) throw new Exception("Fixture handshake failed");
+            await wire.SendAsync(new("accepted", Value: 1), CancellationToken.None);
+            // A target-initiated submission has no preceding request-file command.
+            await FileSender.SendAsync(wire, file, CancellationToken.None);
+            await release.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        });
+        using var receiving = new AdminConnection(pairing with { Port = ((IPEndPoint)server.LocalEndpoint).Port });
+        if (receiving.ReceiveFolder != folder) throw new Exception("Per-PC receive folder was not restored");
+        string? saved = null;
+        receiving.Received += p => { if (p.Type == "notice" && p.Text.StartsWith("파일 저장 완료: ")) saved = p.Text["파일 저장 완료: ".Length..]; };
+        try
+        {
+            await receiving.ConnectAsync(); await WaitUntil(() => saved != null);
+            if (Path.GetDirectoryName(saved!) != folder || !File.ReadAllBytes(saved!).SequenceEqual(data)) throw new Exception("Target submission did not use the chosen folder");
+        }
+        finally { release.TrySetResult(); }
+        await sending;
     }
     private async Task Run()
     {
@@ -82,10 +118,47 @@ internal sealed class TestRunner : Form
         if (!connection.Connected) throw new Exception("Admin/Agent TLS connection failed");
         await connection.SendAsync(new("message", Text: "CI 왕복 메시지"));
         await WaitUntil(() => Descendants(agent).OfType<TextBox>().Any(t => t.Text.Contains("CI 왕복 메시지")));
-        // Uses the real agent command handler without injecting keyboard/mouse events into the runner.
-        await connection.SendAsync(new("control", Enabled: true));
-        await connection.SendAsync(new("locks", X: 0, Y: 0, Value: 1));
-        await connection.SendAsync(new("unlock")); await connection.SendAsync(new("control", Enabled: false));
+        // Character delivery is checked against an explicitly focused, disposable test textbox.
+        using (var target = new Form { Text = "CI input target" })
+        using (var text = new TextBox { Dock = DockStyle.Fill, Multiline = true })
+        using (var viewport = new ScreenView { RemoteInput = true })
+        {
+            target.Controls.Add(text); target.Show(); SetForegroundWindow(target.Handle); target.Activate(); text.Focus();
+            await WaitUntil(() => text.Focused);
+            await connection.SendAsync(new("control", Enabled: true));
+            string? routed = null; int rawKeys = 0;
+            viewport.TextRemote += value => routed = value;
+            viewport.KeyRemote += (_, _) => rawKeys++;
+            SendMessage(viewport.Handle, 0x100, (IntPtr)Keys.A, IntPtr.Zero);
+            SendMessage(viewport.Handle, 0x102, (IntPtr)'a', IntPtr.Zero);
+            SendMessage(viewport.Handle, 0x101, (IntPtr)Keys.A, IntPtr.Zero);
+            if (routed != "a" || rawKeys != 0) throw new Exception("Character routing duplicated or dropped English input");
+            SendMessage(viewport.Handle, 0x100, (IntPtr)Keys.F1, IntPtr.Zero);
+            SendMessage(viewport.Handle, 0x101, (IntPtr)Keys.F1, IntPtr.Zero);
+            if (rawKeys != 2) throw new Exception("Non-character key routing failed");
+            await connection.SendAsync(new("text", Text: "aAzZ09 !?"));
+            await WaitUntil(() => text.Text == "aAzZ09 !?");
+            await connection.SendAsync(new("control", Enabled: true, X: 1));
+            await WaitUntil(() => agent.LocalMouseLocked && agent.LocalKeyboardLocked);
+            await connection.SendAsync(new("text", Text: "B"));
+            await WaitUntil(() => text.Text == "aAzZ09 !?B");
+            // Stopping screen sharing must not clear the independent remote-control lock.
+            await connection.SendAsync(new("broadcast-stop"));
+            await connection.SendAsync(new("text", Text: "C"));
+            await WaitUntil(() => text.Text == "aAzZ09 !?BC");
+            if (!agent.LocalMouseLocked || !agent.LocalKeyboardLocked) throw new Exception("Screen-share stop cleared the remote-control lock");
+            await connection.SendAsync(new("control", Enabled: true, X: 0));
+            await WaitUntil(() => !agent.LocalMouseLocked && !agent.LocalKeyboardLocked);
+            // Turning remote input off clears its lock while preserving a separately requested lock.
+            await connection.SendAsync(new("locks", X: 1, Y: 0, Value: 0));
+            await connection.SendAsync(new("control", Enabled: true, X: 1));
+            await WaitUntil(() => agent.LocalMouseLocked && agent.LocalKeyboardLocked);
+            await connection.SendAsync(new("control", Enabled: false));
+            await WaitUntil(() => agent.LocalMouseLocked && !agent.LocalKeyboardLocked);
+            await connection.SendAsync(new("unlock"));
+            await WaitUntil(() => !agent.LocalMouseLocked && !agent.LocalKeyboardLocked);
+            target.Close();
+        }
         string file = Storage.PathFor("smoke-source.bin"); byte[] data = RandomNumberGenerator.GetBytes(133001); File.WriteAllBytes(file, data);
         bool confirmed = false;
         connection.Received += p => { if (p.Type == "notice" && p.Text.Contains("받은 파일 폴더")) confirmed = true; };
@@ -94,6 +167,7 @@ internal sealed class TestRunner : Form
         string received = Directory.GetFiles(inbox, "smoke-source-*.bin").Single();
         if (!File.ReadAllBytes(received).SequenceEqual(data)) throw new Exception("Agent file bytes changed");
         File.Delete(received);
+        await TestChosenReceiveFolder(pairing, cert, file, data);
         // Fullscreen reparenting must retain the live viewport after returning.
         using (var panel = new SessionPanel(pairing))
         {
@@ -124,7 +198,10 @@ internal sealed class TestRunner : Form
         await WaitUntil(() => Application.OpenForms.Cast<Form>().Any(f => Descendants(f).OfType<Label>().Any(l => l.Text.StartsWith("관리자 화면 잠금"))));
         await connection.SendAsync(new("unlock"));
         await WaitUntil(() => !Application.OpenForms.Cast<Form>().Any(f => Descendants(f).OfType<Label>().Any(l => l.Text.StartsWith("관리자 화면 잠금"))));
+        await connection.SendAsync(new("control", Enabled: true, X: 1));
+        await WaitUntil(() => agent.LocalMouseLocked && agent.LocalKeyboardLocked);
         connection.Dispose(); await WaitUntil(() => Descendants(agent).OfType<Label>().Any(l => l.Text == "연결 대기 중"));
+        if (agent.LocalMouseLocked || agent.LocalKeyboardLocked) throw new Exception("Disconnect did not clear local input locks");
         // The first approval remembered this registration; subsequent connections must not show a dialog.
         await Task.Delay(200);
         using (var automatic = new AdminConnection(pairing))

@@ -32,6 +32,8 @@ public sealed class AgentForm : Form
     private AgentSettings settings;
     private readonly X509Certificate2 certificate;
     private readonly NativeInput input = new();
+    internal bool LocalMouseLocked => input.MouseLocked;
+    internal bool LocalKeyboardLocked => input.KeyboardLocked;
     private readonly TextBox name = new() { Width = 190 };
     private readonly NumericUpDown port = new() { Minimum = 1024, Maximum = 65535, Width = 95 };
     private readonly TextBox host = new() { Width = 165 };
@@ -256,8 +258,8 @@ public sealed class AgentForm : Form
                             await Ui.OnUi(this, () => { StopDisplay(); return true; }); break;
                         case "screen": active.ScreenEnabled = packet.Enabled; Storage.Audit("agent", packet.Enabled ? "화면 공유 시작" : "화면 공유 종료"); break;
                         case "control":
-                            await Ui.OnUi(this, () => { active.ControlEnabled = packet.Enabled; if (!packet.Enabled) { input.ReleaseRemote(); } AddLog(packet.Enabled ? "원격 입력 켜짐" : "원격 입력 꺼짐"); return true; }); break;
-                        case "move": case "button": case "wheel": case "key":
+                            await Ui.OnUi(this, () => { input.SetRemoteControlBlock(packet.Enabled && packet.X == 1); active.ControlEnabled = packet.Enabled; if (!packet.Enabled) { input.ReleaseRemote(); } AddLog(packet.Enabled ? "원격 입력 켜짐" : "원격 입력 꺼짐"); return true; }); break;
+                        case "move": case "button": case "wheel": case "key": case "text":
                             if (!active.ControlEnabled) throw new InvalidOperationException("원격 입력이 꺼져 있습니다.");
                             await Ui.OnUi(this, () => { ExecuteInput(packet); return true; }); break;
                         case "release": await Ui.OnUi(this, () => { input.ReleaseRemote(); return true; }); break;
@@ -367,6 +369,7 @@ public sealed class AgentForm : Form
             case "button": input.Button(p.Value, p.Enabled); break;
             case "wheel": input.Wheel(p.Value); break;
             case "key": input.Key(p.Value, p.Enabled); break;
+            case "text": input.Text(p.Text); break;
         }
     }
     private async Task SendLocalFile()
@@ -415,7 +418,7 @@ public sealed class AgentForm : Form
     private void SetPrivacy(AgentSession active, bool enabled)
     {
         ClearCurtains(); active.PrivacyEnabled = enabled;
-        if (!enabled) { input.Unlock(); return; }
+        if (!enabled) { input.UnlockManual(); return; }
         StopDisplay(); input.SetLocks(true, true, 0);
         foreach (var screen in Screen.AllScreens)
         {
@@ -429,7 +432,7 @@ public sealed class AgentForm : Form
     {
         StopDisplay(); ClearCurtains(); if (session is { } s) s.PrivacyEnabled = false;
         sharedScreen = new SharedScreenForm(exclusive);
-        sharedScreen.FormClosed += (_, _) => { if (!stoppingDisplay) { ClearCurtains(); input.Unlock(); sharedScreen = null; } };
+        sharedScreen.FormClosed += (_, _) => { if (!stoppingDisplay) { ClearCurtains(); input.UnlockManual(); sharedScreen = null; } };
         if (exclusive)
         {
             input.SetLocks(true, true, 0);
@@ -444,7 +447,7 @@ public sealed class AgentForm : Form
     private void StopDisplay()
     {
         stoppingDisplay = true;
-        try { sharedScreen?.Dispose(); sharedScreen = null; ClearCurtains(); input.Unlock(); }
+        try { sharedScreen?.Dispose(); sharedScreen = null; ClearCurtains(); input.UnlockManual(); }
         finally { stoppingDisplay = false; }
     }
     private void RequestPower(string action)

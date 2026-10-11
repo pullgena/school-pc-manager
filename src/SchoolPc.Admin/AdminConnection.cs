@@ -10,7 +10,12 @@ namespace SchoolPc.Admin;
 public sealed class AdminConnection : IDisposable
 {
     public Pairing Pairing { get; }
-    public AdminConnection(Pairing pairing) { Pairing = pairing; }
+    public AdminConnection(Pairing pairing)
+    {
+        Pairing = pairing;
+        var preferences = Storage.Load<Dictionary<string, string>>("admin.receive-folders");
+        if (preferences != null && preferences.TryGetValue(pairing.Fingerprint, out string? folder)) ReceiveFolder = folder;
+    }
     private TcpClient? client;
     private Channel? channel;
     private readonly CancellationTokenSource stop = new();

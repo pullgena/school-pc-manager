@@ -18,6 +18,7 @@ public sealed class SessionPanel : UserControl
     private bool privacyLocked;
     private readonly CheckBox screen = new() { Text = "화면 보기", AutoSize = true, Margin = new Padding(8) };
     private readonly CheckBox control = new() { Text = "원격 입력", AutoSize = true, Margin = new Padding(8) };
+    private readonly CheckBox blockLocal = new() { Text = "원격 입력 중 대상 입력 차단", AutoSize = true, Margin = new Padding(8) };
     private readonly CheckBox mouseLock = new() { Text = "마우스 잠금", AutoSize = true, Margin = new Padding(8) };
     private readonly CheckBox keyboardLock = new() { Text = "키보드 잠금", AutoSize = true, Margin = new Padding(8) };
     private readonly Label status = Ui.Label("대상 PC 접속 준비 중…");
@@ -40,22 +41,25 @@ public sealed class SessionPanel : UserControl
         var showScreen = new ToolStripMenuItem("화면 보기") { Checked = false, CheckOnClick = true };
         showScreen.CheckedChanged += (_, _) => screen.Checked = showScreen.Checked;
         screen.CheckedChanged += (_, _) => showScreen.Checked = screen.Checked;
-        toolbar.Controls.AddRange([control,
-            Ui.MenuButton("파일", Ui.MenuItem("파일 보내기", async (_, _) => await SendFile()), Ui.MenuItem("파일 받기 요청 (대상 선택)", async (_, _) => await RequestFile())),
+        var textInput = new ToolStripMenuItem("영문·문자 직접 입력") { Checked = true, CheckOnClick = true };
+        textInput.CheckedChanged += (_, _) => { view.TextInput = textInput.Checked; status.Text = textInput.Checked ? "입력한 문자를 대상에 전달합니다." : "키 입력 모드 · 한글 IME는 대상 PC 상태를 따릅니다."; };
+        toolbar.Controls.AddRange([control, blockLocal,
+            Ui.MenuButton("파일", Ui.MenuItem("받은 파일 저장 위치…", (_, _) => ChooseReceiveFolder()), Ui.MenuItem("파일 보내기", async (_, _) => await SendFile()), Ui.MenuItem("파일 받기 요청 (대상 선택)", async (_, _) => await RequestFile())),
             Ui.Button("전체 화면", (_, _) => FullScreen()),
             Ui.MenuButton("내 화면 공유", Ui.MenuItem("일반 창으로 공유", async (_, _) => await StartSharing(false)), Ui.MenuItem("집중 모드로 공유", async (_, _) => await StartSharing(true)), Ui.MenuItem("공유 종료", async (_, _) => await StopSharing())),
             Ui.MenuButton("잠금", Ui.MenuItem("화면 잠금 ON/OFF", async (_, _) => { privacyLocked = !privacyLocked; await Run(new("screen-lock", Enabled: privacyLocked)); }), Ui.MenuItem("입력 잠금 ON/OFF…", (_, _) => ShowLocks()), Ui.MenuItem("입력 잠금 해제", async (_, _) => await Unlock()), new ToolStripSeparator(), Ui.MenuItem("Windows 잠금…", async (_, _) => await LockWindows())),
             Ui.MenuButton("전원", Ui.MenuItem("재시작…", async (_, _) => await Power("restart")), Ui.MenuItem("전원 끄기…", async (_, _) => await Power("shutdown"))),
-            Ui.MenuButton("더 보기", showScreen, Ui.MenuItem("메시지 보내기", (_, _) => Message()), Ui.MenuItem("대상 Wi-Fi 관리 요청", async (_, _) => await Run(new("network-settings")))),
+            Ui.MenuButton("더 보기", showScreen, textInput, Ui.MenuItem("메시지 보내기", (_, _) => Message()), Ui.MenuItem("대상 Wi-Fi 관리 요청", async (_, _) => await Run(new("network-settings")))),
             Ui.Button("연결 끊기", (_, _) => Connection.Dispose())]);
         layout.Controls.Add(toolbar, 0, 0); layout.Controls.Add(view, 0, 2); layout.Controls.Add(status, 0, 3); Controls.Add(layout);
         screen.CheckedChanged += async (_, _) => { if (connected) await Run(new("screen", Enabled: screen.Checked)); };
         control.CheckedChanged += async (_, _) =>
         {
             view.RemoteInput = connected && control.Checked; view.Invalidate();
-            if (connected) await Run(new("control", Enabled: control.Checked));
-            status.Text = control.Checked ? "화면을 클릭한 뒤 마우스와 키보드로 제어하세요. 한글 IME는 대상 PC 상태를 따릅니다." : "화면 보기 전용";
+            if (connected) await Run(new("control", Enabled: control.Checked, X: blockLocal.Checked ? 1 : 0));
+            status.Text = control.Checked ? "화면의 입력 칸을 클릭한 뒤 입력하세요. 한글 IME는 더 보기에서 문자 직접 입력을 꺼 주세요." : "화면 보기 전용";
         };
+        blockLocal.CheckedChanged += async (_, _) => { if (connected) await Run(new("control", Enabled: control.Checked, X: blockLocal.Checked ? 1 : 0)); };
         shareTimer.Tick += async (_, _) =>
         {
             if (!sharing || sharingBusy || shareAwaitingAck || !Connection.Connected) return;
@@ -84,6 +88,7 @@ public sealed class SessionPanel : UserControl
         };
         view.WheelRemote += async delta => await Input(new("wheel", Value: delta));
         view.KeyRemote += async (key, down) => await Input(new("key", Value: key, Enabled: down));
+        view.TextRemote += async text => await Input(new("text", Text: text));
         view.ReleaseRemote += async () => { if (Connection.Connected) await Input(new("release")); };
     }
     public async Task ConnectAsync()
@@ -150,10 +155,19 @@ public sealed class SessionPanel : UserControl
     }
     private async Task RequestFile()
     {
-        using var folder = new FolderBrowserDialog { Description = "관리자 PC에 받은 파일을 저장할 폴더", UseDescriptionForTitle = true };
-        if (folder.ShowDialog(this) != DialogResult.OK) return;
-        Connection.ReceiveFolder = folder.SelectedPath;
+        if (!ChooseReceiveFolder()) return;
         await Run(new("request-file")); status.Text = "대상에서 보낼 파일을 선택하면 지정한 폴더로 복사됩니다.";
+    }
+    private bool ChooseReceiveFolder()
+    {
+        using var folder = new FolderBrowserDialog { Description = "관리자 PC에 받은 파일을 저장할 폴더 (대상이 직접 제출한 파일에도 적용)", UseDescriptionForTitle = true, SelectedPath = Connection.ReceiveFolder ?? "" };
+        if (folder.ShowDialog(this) != DialogResult.OK) return false;
+        Connection.ReceiveFolder = folder.SelectedPath;
+        var preferences = Storage.Load<Dictionary<string, string>>("admin.receive-folders") ?? [];
+        preferences[Connection.Pairing.Fingerprint] = folder.SelectedPath;
+        Storage.Save("admin.receive-folders", preferences);
+        status.Text = "받은 파일 저장 위치: " + folder.SelectedPath;
+        return true;
     }
     private bool Post(Action action)
     {

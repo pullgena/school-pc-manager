@@ -73,6 +73,8 @@ Type: files; Name: "{localappdata}\SchoolPcManager\agent.certificate"
 #else
 Type: files; Name: "{localappdata}\SchoolPcManager\admin.profiles"
 Type: files; Name: "{localappdata}\SchoolPcManager\admin.profiles.new"
+Type: files; Name: "{localappdata}\SchoolPcManager\admin.receive-folders"
+Type: files; Name: "{localappdata}\SchoolPcManager\admin.receive-folders.new"
 #endif
 
 [Code]

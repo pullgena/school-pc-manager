@@ -6,6 +6,7 @@ public sealed class ScreenView : Control
 {
     private Image? image;
     private readonly RemoteWindowsKeys windowsKeys;
+    private readonly HashSet<Keys> textKeys = [];
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool RemoteInput { get; set; }
     public event Action<int, int>? MoveRemote;
@@ -13,9 +14,13 @@ public sealed class ScreenView : Control
     public event Action<int>? WheelRemote;
     public event Action<int, bool>? KeyRemote;
     public event Action? ReleaseRemote;
+    public event Action<string>? TextRemote;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool TextInput { get; set; } = true;
     public ScreenView()
     {
         windowsKeys = new(() => RemoteInput && Focused && FindForm()?.ContainsFocus == true, (key, down) => KeyRemote?.Invoke(key, down));
+        ImeMode = ImeMode.Disable;
         Dock = DockStyle.Fill; BackColor = Color.FromArgb(20, 26, 39); TabStop = true;
         SetStyle(ControlStyles.Selectable | ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
     }
@@ -52,8 +57,30 @@ public sealed class ScreenView : Control
     private static int Button(MouseButtons button) => button switch { MouseButtons.Left => 1, MouseButtons.Right => 2, MouseButtons.Middle => 3, _ => 1 };
     protected override bool IsInputKey(Keys keyData) => RemoteInput || base.IsInputKey(keyData);
     protected override bool ProcessDialogKey(Keys keyData) => RemoteInput || base.ProcessDialogKey(keyData);
-    protected override void OnKeyDown(KeyEventArgs e) { if (RemoteInput) { KeyRemote?.Invoke((int)e.KeyCode, true); e.Handled = true; e.SuppressKeyPress = true; } base.OnKeyDown(e); }
-    protected override void OnKeyUp(KeyEventArgs e) { if (RemoteInput) { KeyRemote?.Invoke((int)e.KeyCode, false); e.Handled = true; } base.OnKeyUp(e); }
-    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); ReleaseRemote?.Invoke(); Invalidate(); }
+    private static bool Printable(Keys key) => key is >= Keys.D0 and <= Keys.Z or >= Keys.NumPad0 and <= Keys.Divide or >= Keys.Oem1 and <= Keys.OemBackslash or Keys.Space;
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        if (RemoteInput)
+        {
+            if (TextInput && !e.Control && !e.Alt && Printable(e.KeyCode))
+            {
+                textKeys.Add(e.KeyCode); e.Handled = true;
+            }
+            else { KeyRemote?.Invoke((int)e.KeyCode, true); e.Handled = true; e.SuppressKeyPress = true; }
+        }
+        base.OnKeyDown(e);
+    }
+    protected override void OnKeyPress(KeyPressEventArgs e)
+    {
+        if (RemoteInput && TextInput) { if (!char.IsControl(e.KeyChar)) TextRemote?.Invoke(e.KeyChar.ToString()); e.Handled = true; }
+        base.OnKeyPress(e);
+    }
+    protected override void OnKeyUp(KeyEventArgs e)
+    {
+        bool textKey = textKeys.Remove(e.KeyCode);
+        if (RemoteInput) { if (!textKey) KeyRemote?.Invoke((int)e.KeyCode, false); e.Handled = true; }
+        base.OnKeyUp(e);
+    }
+    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); textKeys.Clear(); ReleaseRemote?.Invoke(); Invalidate(); }
     protected override void Dispose(bool disposing) { if (disposing) { windowsKeys.Dispose(); image?.Dispose(); } base.Dispose(disposing); }
 }
